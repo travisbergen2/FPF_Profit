@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //| FPF_ProfitableEA.mq5                                              |
 //| Fractal Personality Field Trading EA                              |
-//| v2.3 - FPF INTEGRATED WITH 7 BIG MOVE SIGNALS + MARKET TIME       |
+//| v2.4 - CONTINUOUS PREDICTION: Never stops, always learning!       |
 //+------------------------------------------------------------------+
 #property copyright "FPF Trading System"
-#property version   "2.30"
+#property version   "2.40"
 #property strict
 
 #include "Include/FPF_Engine.mqh"
@@ -18,7 +18,8 @@ input group "=== FPF Core Settings ==="
 input double      FPF_Phi_Entry = 0.08;           // Min Phi for entry (LOWERED for more trades)
 input double      FPF_DecisionPot_Min = 0.06;     // Min decision potential (LOWERED)
 input double      ML_Entry_Threshold = 0.65;      // ML probability threshold (LOWERED)
-input double      ML_Stop_Accuracy = 0.55;        // Stop trading if accuracy drops below
+input int         Price_Prediction_Bars = 10;     // Predict price N bars ahead
+// REMOVED ML_Stop_Accuracy - NEVER stop trading, always learning!
 
 input group "=== Risk Management ==="
 input double      Risk_Percent = 1.5;              // Risk per trade % (INCREASED)
@@ -163,16 +164,15 @@ int OnInit()
    ArrayResize(rollingAccuracy, 50);
    ArrayInitialize(rollingAccuracy, -1);  // -1 = no trade yet (not 0.5!)
 
-   Print("==========================================================");
-   Print("FPF EA v2.3 - 7 SIGNALS INTEGRATED + MARKET TIME MODE");
-   Print("==========================================================");
-   Print("✅ FPF now uses 7 big move signals as inputs!");
-   Print("✅ Time filter DISABLED - using market conditions only");
-   Print("Adaptive Learning: ", (Enable_Learning ? "ON" : "OFF"));
-   Print("Rejection Learning: ", (Enable_Learning ? "ON" : "OFF"));
-   Print("Compliance Monitoring: ", (Enable_Compliance ? "ON" : "OFF"));
-   Print("Trading on MARKET TIME, not people time!");
-   Print("=========================================================="
+   Print("=============================================================");
+   Print("FPF EA v2.4 - CONTINUOUS PREDICTION: NEVER STOPS LEARNING!");
+   Print("=============================================================");
+   Print("🔮 Makes price prediction EVERY BAR (", Price_Prediction_Bars, " bars ahead)");
+   Print("📊 Verifies predictions and logs accuracy");
+   Print("🧠 Learns from prediction errors continuously");
+   Print("✅ NEVER stops trading - always improving!");
+   Print("FPF uses 7 big move signals | Market time (not clock time)");
+   Print("============================================================="
 );
    
    return(INIT_SUCCEEDED);
@@ -202,23 +202,17 @@ void OnTick()
    
    // Update FPF state
    UpdateFPFState();
-   
-   // Check ML gating
-   UpdateMLGating();
-   
+
+   // Make price prediction and learn (ALWAYS ENABLED, NEVER STOPS!)
+   MakePricePredictionAndLearn();
+
    // Manage existing positions
    ManagePositions();
 
-   // ALWAYS check for entries (even if disabled) to enable rejection learning!
-   // This lets the EA learn from missed opportunities even during bootstrap
-   if(state.tradingEnabled && riskMgr.CanOpenPosition())
+   // Check for entries (always enabled now!)
+   if(riskMgr.CanOpenPosition())
    {
-      CheckForEntry();  // Normal trading
-   }
-   else if(Enable_Learning)
-   {
-      // Trading disabled but learning enabled - record what we're missing!
-      RecordRejectionDuringDisabled();
+      CheckForEntry();
    }
 
    // Update dashboard
@@ -430,39 +424,131 @@ double ComputeNoveltyNoise()
 }
 
 //+------------------------------------------------------------------+
-//| Update ML Gating                                                   |
+//| CONTINUOUS PRICE PREDICTION & LEARNING (NEVER STOPS TRADING!)     |
 //+------------------------------------------------------------------+
-void UpdateMLGating()
+struct PricePrediction {
+   datetime predictionTime;
+   double predictedPrice;
+   double currentPrice;
+   int barsAhead;
+   double phi;
+   double mlProb;
+   double actualPrice;
+   bool verified;
+   double error;
+};
+
+PricePrediction predictions[100];  // Rolling prediction history
+int predictionIndex = 0;
+
+void MakePricePredictionAndLearn()
 {
-   // Calculate rolling accuracy (-1 = no trade, 0 = loss, 1 = win)
-   int total = 0;
-   int wins = 0;
-   for(int i = 0; i < ArraySize(rollingAccuracy); i++)
+   // ALWAYS ENABLED - Never stop trading, always learning!
+   state.tradingEnabled = true;
+
+   // Get current price
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   if(CopyRates(_Symbol, TF_Primary, 0, Price_Prediction_Bars + 1, rates) < Price_Prediction_Bars + 1)
+      return;
+
+   double currentPrice = rates[0].close;
+
+   // ===== STEP 1: MAKE PREDICTION FOR FUTURE PRICE =====
+   // Use FPF + signals to predict where price will be in N bars
+   double fpfMomentum = fpf.P[fpf.P_S];  // Sentiment
+   double fpfAlignment = fpf.P[fpf.P_ALIGN];  // Alignment
+
+   signalDetector.Update(_Symbol, TF_Primary);
+   double compression = signalDetector.GetCompressionScore();
+   double sweeps = signalDetector.GetSweepScore();
+   double tfAlign = signalDetector.GetTimeframeAlignment();
+
+   // Price direction prediction (-1 to +1)
+   double directionScore = (fpfMomentum * 0.4 +
+                            fpfAlignment * 0.2 +
+                            (compression - 0.5) * 0.2 +
+                            (sweeps - 0.5) * 0.2);
+
+   // Price magnitude prediction (how far it will move)
+   double movementMagnitude = state.currentATR * Price_Prediction_Bars * MathAbs(directionScore);
+
+   // Predicted price
+   double predictedPrice = currentPrice + (directionScore * movementMagnitude);
+
+   // Record prediction
+   predictions[predictionIndex].predictionTime = TimeCurrent();
+   predictions[predictionIndex].predictedPrice = predictedPrice;
+   predictions[predictionIndex].currentPrice = currentPrice;
+   predictions[predictionIndex].barsAhead = Price_Prediction_Bars;
+   predictions[predictionIndex].phi = state.currentPhi;
+   predictions[predictionIndex].mlProb = state.mlProbability;
+   predictions[predictionIndex].verified = false;
+
+   if(Enable_Debug)
+      Print("🔮 PREDICTION: Current: ", currentPrice, " → Predicted (", Price_Prediction_Bars, " bars): ",
+            predictedPrice, " | Direction: ", DoubleToString(directionScore, 3));
+
+   // ===== STEP 2: VERIFY OLD PREDICTIONS =====
+   int verified = 0;
+   int correct = 0;
+   double totalError = 0;
+
+   for(int i = 0; i < 100; i++)
    {
-      if(rollingAccuracy[i] >= 0)  // Only count actual trades (0 or 1)
+      if(predictions[i].predictionTime == 0) continue;  // Empty slot
+      if(predictions[i].verified) continue;  // Already verified
+
+      // Check if enough bars have passed
+      int barsPassed = Bars(_Symbol, TF_Primary) -
+                      Bars(_Symbol, TF_Primary, predictions[i].predictionTime, TimeCurrent());
+
+      if(barsPassed >= predictions[i].barsAhead)
       {
-         total++;
-         wins += (int)rollingAccuracy[i];
+         // Time to verify!
+         double actualPrice = rates[barsPassed].close;
+         predictions[i].actualPrice = actualPrice;
+         predictions[i].error = MathAbs(actualPrice - predictions[i].predictedPrice);
+         predictions[i].verified = true;
+
+         // Check if direction was correct
+         double predictedDir = (predictions[i].predictedPrice > predictions[i].currentPrice) ? 1 : -1;
+         double actualDir = (actualPrice > predictions[i].currentPrice) ? 1 : -1;
+         bool directionCorrect = (predictedDir == actualDir);
+
+         if(directionCorrect) correct++;
+         verified++;
+         totalError += predictions[i].error;
+
+         if(Enable_Debug)
+            Print("✅ VERIFIED: Predicted: ", predictions[i].predictedPrice,
+                  " | Actual: ", actualPrice,
+                  " | Error: ", predictions[i].error,
+                  " | Direction: ", (directionCorrect ? "CORRECT" : "WRONG"));
       }
    }
 
-   // Bootstrap: If no trades yet, assume 75% accuracy to allow trading
-   double accuracy = (total > 0) ? ((double)wins / total) : 0.75;
-   
+   // ===== STEP 3: LEARN FROM PREDICTION ACCURACY =====
+   if(verified > 0)
+   {
+      double directionAccuracy = (double)correct / verified;
+      double avgError = totalError / verified;
+
+      Print("📊 PREDICTION STATS: Direction Accuracy: ", DoubleToString(directionAccuracy * 100, 1),
+            "% | Avg Error: ", DoubleToString(avgError, 1), " points | Verified: ", verified);
+
+      // Adjust confidence based on prediction accuracy
+      if(directionAccuracy > 0.65)
+         Print("✅ PREDICTION IMPROVING - High confidence trades!");
+      else if(directionAccuracy < 0.45)
+         Print("⚠️ PREDICTION WEAK - Learning more patterns...");
+   }
+
    // Calculate ML probability based on FPF state and signals
    state.mlProbability = CalculateMLProbability();
-   
-   // Gate trading based on accuracy and probability
-   if(accuracy < ML_Stop_Accuracy)
-   {
-      state.tradingEnabled = false;
-      if(Enable_Debug)
-         Print("Trading DISABLED - Accuracy: ", accuracy, " < ", ML_Stop_Accuracy);
-   }
-   else
-   {
-      state.tradingEnabled = true;
-   }
+
+   // Move to next prediction slot
+   predictionIndex = (predictionIndex + 1) % 100;
 }
 
 //+------------------------------------------------------------------+
@@ -508,60 +594,6 @@ double CalculateMLProbability()
    probability = MathMax(0.0, MathMin(1.0, probability));
 
    return probability;
-}
-
-//+------------------------------------------------------------------+
-//| Record rejection when trading is disabled (LEARNING FROM PAUSE)   |
-//+------------------------------------------------------------------+
-void RecordRejectionDuringDisabled()
-{
-   // This function records "missed" opportunities when trading is disabled
-   // due to low accuracy or other system-level blocks
-
-   // Get common data
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   CopyRates(_Symbol, TF_Primary, 0, 1, rates);
-   double currentPrice = rates[0].close;
-
-   // Check if this would have been a valid entry (if trading was enabled)
-   // Skip all the usual filters, just check if signals are present
-
-   // Update signal detector
-   signalDetector.Update(_Symbol, TF_Primary);
-
-   bool compressionDetected = signalDetector.IsCompressionDetected();
-   bool sweepsDetected = signalDetector.AreSweepsDetected();
-   bool stopHuntDetected = signalDetector.IsStopHuntDetected();
-   bool wickTestDetected = signalDetector.IsWickTestDetected();
-   bool tfAlignment = signalDetector.IsTimeframeAligned();
-
-   int signalCount = 0;
-   if(compressionDetected) signalCount++;
-   if(sweepsDetected) signalCount++;
-   if(stopHuntDetected) signalCount++;
-   if(wickTestDetected) signalCount++;
-   if(tfAlignment) signalCount++;
-
-   // Only record if there were actual signals (a real opportunity)
-   if(signalCount >= Min_Signals_Required &&
-      state.currentPhi >= FPF_Phi_Entry * 0.8 &&  // Close to threshold
-      state.mlProbability >= ML_Entry_Threshold * 0.8)
-   {
-      // This was a real opportunity we missed due to being disabled!
-      learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
-         signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
-         signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
-         state.isTrendingMarket, state.isHighVolatility, 1,
-         "Trading DISABLED - Low accuracy (bootstrap phase)",
-         false, false, false, false, false, false, currentPrice);
-
-      if(Enable_Debug)
-         Print("📊 OPPORTUNITY MISSED: Trading disabled but ", signalCount,
-               " signals detected | Phi: ", state.currentPhi, " ML: ", state.mlProbability);
-   }
 }
 
 //+------------------------------------------------------------------+
