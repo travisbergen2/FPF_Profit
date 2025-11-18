@@ -1,15 +1,17 @@
 //+------------------------------------------------------------------+
 //| FPF_ProfitableEA.mq5                                              |
 //| Fractal Personality Field Trading EA                              |
-//| Low DD, High Win Rate System with ML Gating                       |
+//| v2.1 - ADAPTIVE LEARNING + COMPLIANCE MONITORING                  |
 //+------------------------------------------------------------------+
 #property copyright "FPF Trading System"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 #include <FPF_Engine.mqh>
 #include <BigMoveSignals.mqh>
 #include <RiskManager.mqh>
+#include <ComplianceMonitor.mqh>
+#include <AdaptiveLearning.mqh>
 
 //--- Input Parameters
 input group "=== FPF Core Settings ==="
@@ -56,10 +58,25 @@ input double      Trail_Step_Multiplier = 0.3;     // Trail by 0.3R
 input bool        Enable_Debug = false;
 input bool        Adaptive_Risk = true;            // Reduce risk after losses
 
+input group "=== Adaptive Learning ==="
+input bool        Enable_Learning = true;          // Enable adaptive learning
+input bool        Use_Learned_Thresholds = true;   // Use learned optimal thresholds
+input bool        Use_Predictions = true;          // Use predictive analytics
+input int         Min_Learning_Samples = 20;       // Min trades before learning kicks in
+
+input group "=== Compliance ==="
+input bool        Enable_Compliance = true;        // Enable compliance monitoring
+input int         Max_Trades_Per_Hour = 10;        // Max trades per hour
+input int         Max_Daily_Trades = 50;           // Max trades per day
+input int         Max_Rapid_Reversals = 3;         // Max reversals in 15 min
+input double      Min_Hold_Time_Sec = 60;          // Min holding time (seconds)
+
 //--- Global Objects
 FractalPersonalityField fpf;
 BigMoveSignalDetector signalDetector;
 RiskManager riskMgr;
+ComplianceMonitor compliance;
+AdaptiveLearningEngine learningEngine;
 
 //--- Trading State
 struct TradingState {
@@ -79,6 +96,13 @@ struct TradingState {
    double currentRiskMultiplier;
    bool isHighVolatility;
    bool isTrendingMarket;
+   double predictedSuccess;        // Learned prediction
+   double learnedPhiMin;           // Adaptive threshold
+   double learnedMLProbMin;        // Adaptive threshold
+   bool complianceOK;              // Compliance status
+   ulong lastTradeTicket;          // Track for learning
+   datetime lastTradeOpenTime;     // Track for learning
+   double lastTradeOpenPrice;      // Track for learning
 };
 TradingState state;
 
@@ -101,6 +125,21 @@ int OnInit()
    riskMgr.Init(Risk_Percent, Max_Daily_Loss_Percent, Max_Positions,
                 ATR_SL_Multiplier, Base_TP_Multiplier);
 
+   // Initialize compliance monitor
+   if(Enable_Compliance)
+   {
+      compliance.Init(Max_Daily_Trades, Max_Trades_Per_Hour, Max_Rapid_Reversals,
+                      Min_Hold_Time_Sec, 5);
+      Print("Compliance Monitor: ENABLED");
+   }
+
+   // Initialize learning engine
+   if(Enable_Learning)
+   {
+      learningEngine.SetLearningEnabled(true);
+      Print("Adaptive Learning: ENABLED");
+   }
+
    // Initialize state
    state.dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
    state.tradesWon = 0;
@@ -112,12 +151,24 @@ int OnInit()
    state.currentRiskMultiplier = 1.0;
    state.isHighVolatility = false;
    state.isTrendingMarket = false;
+   state.predictedSuccess = 0.55;
+   state.learnedPhiMin = FPF_Phi_Entry;
+   state.learnedMLProbMin = ML_Entry_Threshold;
+   state.complianceOK = true;
+   state.lastTradeTicket = 0;
+   state.lastTradeOpenTime = 0;
+   state.lastTradeOpenPrice = 0;
    ArrayResize(state.rollingAccuracy, 50);
    ArrayInitialize(state.rollingAccuracy, 0.5);
-   
-   Print("FPF Profitable EA Initialized Successfully");
+
+   Print("===========================================");
+   Print("FPF OPTIMIZED EA v2.1 - FULLY INITIALIZED");
+   Print("===========================================");
+   Print("Adaptive Learning: ", (Enable_Learning ? "ON" : "OFF"));
+   Print("Compliance Monitoring: ", (Enable_Compliance ? "ON" : "OFF"));
    Print("ML Entry Threshold: ", ML_Entry_Threshold);
    Print("ML Stop Accuracy: ", ML_Stop_Accuracy);
+   Print("===========================================");
    
    return(INIT_SUCCEEDED);
 }
@@ -199,13 +250,37 @@ void UpdateFPFState()
    // Update adaptive risk
    UpdateAdaptiveRisk();
 
+   // Update learned thresholds if using adaptive learning
+   if(Enable_Learning && Use_Learned_Thresholds)
+   {
+      state.learnedPhiMin = learningEngine.GetOptimalPhiMin();
+      state.learnedMLProbMin = learningEngine.GetOptimalMLProbMin();
+   }
+
+   // Generate prediction if learning enabled
+   if(Enable_Learning && Use_Predictions)
+   {
+      MqlDateTime dt;
+      TimeCurrent(dt);
+
+      double comp = signalDetector.GetCompressionScore();
+      double sweep = signalDetector.GetSweepScore();
+      double tfAlign = signalDetector.GetTimeframeAlignment();
+
+      state.predictedSuccess = learningEngine.PredictSuccessProbability(
+         state.currentPhi, state.mlProbability, comp, sweep, tfAlign,
+         dt.hour, state.isTrendingMarket, state.isHighVolatility
+      );
+   }
+
    if(Enable_Debug)
    {
       Print("FPF Update - Phi: ", state.currentPhi,
             " DecPot: ", state.currentDecPot,
             " Ae: ", Ae, " An: ", An,
             " Regime: ", (state.isTrendingMarket ? "TRENDING" : "RANGING"),
-            " RiskMult: ", state.currentRiskMultiplier);
+            " RiskMult: ", state.currentRiskMultiplier,
+            " Prediction: ", state.predictedSuccess);
    }
 }
 
@@ -388,10 +463,14 @@ void CheckForEntry()
       }
    }
 
-   // Primary FPF gating (RELAXED thresholds)
-   if(state.currentPhi < FPF_Phi_Entry)
+   // Use learned thresholds if enabled, otherwise use configured
+   double phi_threshold = Use_Learned_Thresholds ? state.learnedPhiMin : FPF_Phi_Entry;
+   double ml_threshold = Use_Learned_Thresholds ? state.learnedMLProbMin : ML_Entry_Threshold;
+
+   // Primary FPF gating (adaptive or configured thresholds)
+   if(state.currentPhi < phi_threshold)
    {
-      if(Enable_Debug) Print("Entry rejected - Low Phi: ", state.currentPhi);
+      if(Enable_Debug) Print("Entry rejected - Low Phi: ", state.currentPhi, " < ", phi_threshold);
       return;
    }
 
@@ -401,11 +480,21 @@ void CheckForEntry()
       return;
    }
 
-   // ML gating (RELAXED threshold)
-   if(state.mlProbability < ML_Entry_Threshold)
+   // ML gating (adaptive or configured threshold)
+   if(state.mlProbability < ml_threshold)
    {
-      if(Enable_Debug) Print("Entry rejected - Low ML prob: ", state.mlProbability);
+      if(Enable_Debug) Print("Entry rejected - Low ML prob: ", state.mlProbability, " < ", ml_threshold);
       return;
+   }
+
+   // Predictive gating (if learning enabled)
+   if(Enable_Learning && Use_Predictions)
+   {
+      if(!learningEngine.ShouldTakeTrade(state.currentPhi, state.mlProbability, state.predictedSuccess))
+      {
+         if(Enable_Debug) Print("Entry rejected - Learned pattern suggests low success: ", state.predictedSuccess);
+         return;
+      }
    }
 
    // Detect big move signals
@@ -435,6 +524,19 @@ void CheckForEntry()
    // Determine direction with improved logic
    int direction = DetermineDirectionImproved();
    if(direction == 0) return;
+
+   // Compliance check before executing
+   if(Enable_Compliance)
+   {
+      double volume = riskMgr.CalculateLotSize(_Symbol, state.currentATR * ATR_SL_Multiplier / SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+      if(!compliance.IsTradeCompliant(_Symbol, direction, volume))
+      {
+         state.complianceOK = false;
+         Print("COMPLIANCE VIOLATION: Trade blocked - ", compliance.GetViolationReason());
+         return;
+      }
+      state.complianceOK = true;
+   }
 
    // Execute trade with dynamic SL/TP
    ExecuteTradeWithDynamicLevels(direction);
@@ -643,6 +745,15 @@ void OnTrade()
             if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
             {
                double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+               double volume = HistoryDealGetDouble(ticket, DEAL_VOLUME);
+               long deal_type = HistoryDealGetInteger(ticket, DEAL_TYPE);
+               double close_price = HistoryDealGetDouble(ticket, DEAL_PRICE);
+               datetime close_time = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+
+               // Get entry data
+               double open_price = state.lastTradeOpenPrice;
+               datetime open_time = state.lastTradeOpenTime;
+               int direction = (deal_type == DEAL_TYPE_SELL) ? 1 : -1; // Opposite of exit type
 
                // Update rolling accuracy
                bool isWin = profit > 0;
@@ -655,6 +766,34 @@ void OnTrade()
                // Update FPF plasticity
                double reward = MathTanh(profit / 1000.0);
                fpf.UpdateJ(reward);
+
+               // Calculate R-multiple
+               double sl_distance = MathAbs(open_price - state.lastTradeOpenPrice);
+               double rMultiple = (sl_distance > 0) ? MathAbs(profit) / sl_distance : 0;
+
+               // Record pattern for learning
+               if(Enable_Learning)
+               {
+                  MqlDateTime dt;
+                  TimeToStruct(open_time, dt);
+
+                  learningEngine.RecordPattern(
+                     state.currentPhi, state.currentDecPot, state.mlProbability,
+                     state.currentATR, 50.0, // RSI placeholder
+                     signalDetector.GetCompressionScore(),
+                     signalDetector.GetSweepScore(),
+                     signalDetector.GetTimeframeAlignment(),
+                     state.isTrendingMarket, state.isHighVolatility,
+                     direction, dt.hour, profit, rMultiple, open_time
+                  );
+               }
+
+               // Record for compliance
+               if(Enable_Compliance)
+               {
+                  compliance.RecordTrade(open_time, close_time, open_price,
+                                        close_price, profit, volume, direction, _Symbol);
+               }
 
                // Update stats and consecutive tracking
                if(isWin)
@@ -670,8 +809,16 @@ void OnTrade()
                   state.consecutiveWins = 0;
                }
 
-               Print("Trade closed - Profit: ", profit, " Reward: ", reward,
+               Print("Trade closed - Profit: ", profit, " R-Mult: ", rMultiple,
+                     " Reward: ", reward,
                      " Consecutive W/L: ", state.consecutiveWins, "/", state.consecutiveLosses);
+
+               // Trigger learning update periodically
+               if(Enable_Learning && (state.tradesWon + state.tradesLost) % 10 == 0)
+               {
+                  Print("LEARNING: Triggering periodic optimization...");
+                  learningEngine.LearnFromPatterns();
+               }
             }
          }
       }
@@ -894,8 +1041,13 @@ void ExecuteTradeWithDynamicLevels(int direction)
                " Lot: ", adjusted_lot,
                " SL: ", sl_points, " pts",
                " ML: ", state.mlProbability,
+               " Prediction: ", state.predictedSuccess,
                " RiskMult: ", state.currentRiskMultiplier);
+
          state.lastTradeTime = TimeCurrent();
+         state.lastTradeTicket = result.order;
+         state.lastTradeOpenTime = TimeCurrent();
+         state.lastTradeOpenPrice = price;
       }
       else
       {
@@ -993,11 +1145,21 @@ void UpdateDashboard()
    double dailyPL_pct = (state.dayStartBalance > 0) ? (dailyPL / state.dayStartBalance * 100) : 0;
 
    string dashboard = "\n";
-   dashboard += "=== FPF OPTIMIZED EA v2.0 ===\n";
-   dashboard += "Status: " + (state.tradingEnabled ? "ACTIVE" : "PAUSED") + "\n";
+   dashboard += "=== FPF OPTIMIZED EA v2.1 (LEARNING + COMPLIANCE) ===\n";
+   dashboard += "Status: " + (state.tradingEnabled ? "ACTIVE" : "PAUSED") +
+                " | Compliance: " + (state.complianceOK ? "OK" : "VIOLATION") + "\n";
    dashboard += "ML Prob: " + DoubleToString(state.mlProbability, 3) +
                 " | Phi: " + DoubleToString(state.currentPhi, 3) +
                 " | DecPot: " + DoubleToString(state.currentDecPot, 3) + "\n";
+
+   // Show learning metrics if enabled
+   if(Enable_Learning)
+   {
+      dashboard += "Prediction: " + DoubleToString(state.predictedSuccess * 100, 1) + "%" +
+                   " | Learned Phi>: " + DoubleToString(state.learnedPhiMin, 3) +
+                   " | ML>: " + DoubleToString(state.learnedMLProbMin, 3) + "\n";
+   }
+
    dashboard += "Regime: " + (state.isTrendingMarket ? "TRENDING" : "RANGING") +
                 " | Vol: " + (state.isHighVolatility ? "HIGH" : "NORMAL") +
                 " | ATR: " + DoubleToString(state.currentATR, 1) + "\n";
