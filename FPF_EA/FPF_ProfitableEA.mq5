@@ -7,11 +7,11 @@
 #property version   "2.10"
 #property strict
 
-#include <FPF_Engine.mqh>
-#include <BigMoveSignals.mqh>
-#include <RiskManager.mqh>
-#include <ComplianceMonitor.mqh>
-#include <AdaptiveLearning.mqh>
+#include "Include/FPF_Engine.mqh"
+#include "Include/BigMoveSignals.mqh"
+#include "Include/RiskManager.mqh"
+#include "Include/ComplianceMonitor.mqh"
+#include "Include/AdaptiveLearning.mqh"
 
 //--- Input Parameters
 input group "=== FPF Core Settings ==="
