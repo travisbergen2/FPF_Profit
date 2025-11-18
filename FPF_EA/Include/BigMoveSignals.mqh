@@ -55,10 +55,10 @@ public:
    {
       atr_period = atr_p;
       compression_lookback = comp_lb;
-      compression_threshold = comp_th;
+      compression_threshold = comp_th;      // Tightened to 0.25 (from 0.30)
       volume_ma_period = vol_ma;
-      sweep_tolerance = sweep_tol;
-      
+      sweep_tolerance = sweep_tol;          // Tightened to 8 (from 10)
+
       ResetSignals();
    }
    
@@ -208,7 +208,7 @@ public:
          }
       }
       
-      if(sweep_count >= 3)
+      if(sweep_count >= 4)  // TIGHTENED: require 4 sweeps instead of 3
       {
          sweeps_detected = true;
          sweep_score = MathMin((double)sweep_count / 5.0, 1.0);
@@ -235,8 +235,8 @@ public:
       
       long current_vol = volumes[0];
       double vol_ratio = (vol_avg > 0) ? ((double)current_vol / vol_avg) : 1.0;
-      
-      if(vol_ratio < 0.7)
+
+      if(vol_ratio < 0.65)  // TIGHTENED: from 0.7 to 0.65 for stricter narrowing
       {
          spread_narrowing = true;
       }
@@ -258,18 +258,19 @@ public:
          double body = MathAbs(close - open);
          double upper_wick = high - MathMax(open, close);
          double lower_wick = MathMin(open, close) - low;
-         
-         if(lower_wick > body * 2.0 && close > open)
+
+         // TIGHTENED: require 2.5x body (from 2.0x) for stronger signal
+         if(lower_wick > body * 2.5 && close > open)
          {
             stop_hunt_detected = true;
-            stop_hunt_score = MathMin(lower_wick / body / 3.0, 1.0);
+            stop_hunt_score = MathMin(lower_wick / body / 3.5, 1.0);
             break;
          }
-         
-         if(upper_wick > body * 2.0 && close < open)
+
+         if(upper_wick > body * 2.5 && close < open)
          {
             stop_hunt_detected = true;
-            stop_hunt_score = MathMin(upper_wick / body / 3.0, 1.0);
+            stop_hunt_score = MathMin(upper_wick / body / 3.5, 1.0);
             break;
          }
       }
@@ -294,21 +295,22 @@ public:
          double upper_wick = high - MathMax(open, close);
          double lower_wick = MathMin(open, close) - low;
          double range = high - low;
-         
-         if(upper_wick > range * 0.3 && lower_wick > range * 0.3)
+
+         // OPTIMIZED: require 35% range (from 30%) for stronger wick tests
+         if(upper_wick > range * 0.35 && lower_wick > range * 0.35)
          {
             wick_count++;
          }
       }
-      
-      if(wick_count >= 2)
+
+      if(wick_count >= 3)  // TIGHTENED: require 3 wick tests instead of 2
       {
          wick_test_detected = true;
-         wick_score = MathMin((double)wick_count / 3.0, 1.0);
+         wick_score = MathMin((double)wick_count / 4.0, 1.0);
       }
       else
       {
-         wick_score = (double)wick_count / 3.0;
+         wick_score = (double)wick_count / 4.0;
       }
    }
    
