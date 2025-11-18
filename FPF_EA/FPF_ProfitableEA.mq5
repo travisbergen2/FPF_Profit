@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //| FPF_ProfitableEA.mq5                                              |
 //| Fractal Personality Field Trading EA                              |
-//| v2.1 - ADAPTIVE LEARNING + COMPLIANCE MONITORING                  |
+//| v2.3 - FPF INTEGRATED WITH 7 BIG MOVE SIGNALS + MARKET TIME       |
 //+------------------------------------------------------------------+
 #property copyright "FPF Trading System"
-#property version   "2.10"
+#property version   "2.30"
 #property strict
 
 #include "Include/FPF_Engine.mqh"
@@ -44,7 +44,7 @@ input ENUM_TIMEFRAMES TF_Secondary = PERIOD_M5;
 input ENUM_TIMEFRAMES TF_Tertiary = PERIOD_M1;
 
 input group "=== Time Filtering ==="
-input bool        Use_Time_Filter = true;          // Enable session filtering
+input bool        Use_Time_Filter = false;         // DISABLED - use market regime instead!
 input int         Trade_Start_Hour = 2;            // Start hour (UTC) - London open
 input int         Trade_End_Hour = 16;             // End hour (UTC) - NY close
 input int         Trade_Cooldown_Minutes = 30;     // Minutes between trades
@@ -163,14 +163,17 @@ int OnInit()
    ArrayResize(rollingAccuracy, 50);
    ArrayInitialize(rollingAccuracy, 0.5);
 
-   Print("===========================================");
-   Print("FPF OPTIMIZED EA v2.1 - FULLY INITIALIZED");
-   Print("===========================================");
+   Print("==========================================================");
+   Print("FPF EA v2.3 - 7 SIGNALS INTEGRATED + MARKET TIME MODE");
+   Print("==========================================================");
+   Print("✅ FPF now uses 7 big move signals as inputs!");
+   Print("✅ Time filter DISABLED - using market conditions only");
    Print("Adaptive Learning: ", (Enable_Learning ? "ON" : "OFF"));
+   Print("Rejection Learning: ", (Enable_Learning ? "ON" : "OFF"));
    Print("Compliance Monitoring: ", (Enable_Compliance ? "ON" : "OFF"));
-   Print("ML Entry Threshold: ", ML_Entry_Threshold);
-   Print("ML Stop Accuracy: ", ML_Stop_Accuracy);
-   Print("===========================================");
+   Print("Trading on MARKET TIME, not people time!");
+   Print("=========================================================="
+);
    
    return(INIT_SUCCEEDED);
 }
@@ -287,7 +290,7 @@ void UpdateFPFState()
 }
 
 //+------------------------------------------------------------------+
-//| Compute Emotive Force                                              |
+//| Compute Emotive Force (USING 7 BIG MOVE SIGNALS AS INPUT!)        |
 //+------------------------------------------------------------------+
 double ComputeEmotiveForce()
 {
@@ -296,38 +299,71 @@ double ComputeEmotiveForce()
    ArraySetAsSeries(atr_buffer, true);
    int h_atr = iATR(_Symbol, TF_Primary, ATR_Period);
    if(h_atr == INVALID_HANDLE) return 0;
-   
+
    CopyBuffer(h_atr, 0, 0, 1, atr_buffer);
    double atr = atr_buffer[0];
    IndicatorRelease(h_atr);
-   
+
    // Get price data
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(_Symbol, TF_Primary, 0, 6, rates) < 6) return 0;
-   
+
    double price = rates[0].close;
-   
+
    // Volatility component
    double volRatio = (price > 0) ? (atr / price) : 0;
-   
+
    // Price momentum component
    double close0 = rates[0].close;
    double close5 = rates[5].close;
    double momentum = (close5 > 0) ? ((close0 - close5) / close5) : 0;
-   
+
    // Volume component
    long volumes[];
    ArraySetAsSeries(volumes, true);
    if(CopyTickVolume(_Symbol, TF_Primary, 0, 2, volumes) < 2) return 0;
-   
+
    long vol0 = volumes[0];
    long vol1 = volumes[1];
    double volSpike = (vol1 > 0) ? ((double)vol0 / vol1) : 1.0;
-   
-   // Combine into emotive force
-   double Ae = MathTanh(momentum * 10.0) * volRatio * MathMin(volSpike, 2.0);
-   
+
+   // *** INTEGRATE 7 BIG MOVE SIGNALS INTO FPF ***
+   // Update signal detector first
+   signalDetector.Update(_Symbol, TF_Primary);
+
+   // Get the 7 signal scores (0-1 normalized)
+   double compression = signalDetector.GetCompressionScore();      // Range compression
+   double sweeps = signalDetector.GetSweepScore();                 // Liquidity sweeps
+   double stopHunts = signalDetector.GetStopHuntScore();          // Stop hunts
+   double wicks = signalDetector.GetWickScore();                  // Wick tests
+   double spreadNarrow = signalDetector.IsSpreadNarrowing() ? 1.0 : 0.0;
+   double tfAlign = signalDetector.GetTimeframeAlignment();       // Multi-TF alignment
+
+   // Combine 7 signals into a "big move pressure" score (0-1)
+   double bigMovePressure = (compression * 0.25 +      // Compression is strongest
+                             sweeps * 0.20 +           // Sweeps show liquidity hunting
+                             stopHunts * 0.15 +        // Stop hunts show smart money
+                             wicks * 0.10 +            // Wicks show tests
+                             spreadNarrow * 0.10 +     // Spread narrowing shows calm before storm
+                             tfAlign * 0.20);          // TF alignment shows conviction
+
+   // Combine traditional momentum + volume + BIG MOVE SIGNALS
+   // This is the KEY INNOVATION - FPF now "feels" pre-move conditions!
+   double Ae = MathTanh(momentum * 10.0) *              // Directional momentum
+               volRatio *                                // Volatility pressure
+               MathMin(volSpike, 2.0) *                 // Volume spike
+               (1.0 + bigMovePressure * 2.0);           // BIG MOVE AMPLIFIER (up to 3x)
+
+   if(Enable_Debug)
+   {
+      Print("FPF Input - BigMove: ", DoubleToString(bigMovePressure, 3),
+            " | Comp: ", DoubleToString(compression, 2),
+            " | Sweeps: ", DoubleToString(sweeps, 2),
+            " | TFAlign: ", DoubleToString(tfAlign, 2),
+            " | Ae: ", DoubleToString(Ae, 4));
+   }
+
    return Ae;
 }
 
@@ -1118,7 +1154,7 @@ void UpdateDashboard()
    double dailyPL_pct = (state.dayStartBalance > 0) ? (dailyPL / state.dayStartBalance * 100) : 0;
 
    string dashboard = "\n";
-   dashboard += "=== FPF OPTIMIZED EA v2.1 (LEARNING + COMPLIANCE) ===\n";
+   dashboard += "=== FPF EA v2.3 (7 SIGNALS INTEGRATED + MARKET TIME) ===\n";
    dashboard += "Status: " + (state.tradingEnabled ? "ACTIVE" : "PAUSED") +
                 " | Compliance: " + (state.complianceOK ? "OK" : "VIOLATION") + "\n";
    dashboard += "ML Prob: " + DoubleToString(state.mlProbability, 3) +
