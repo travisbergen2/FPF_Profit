@@ -31,6 +31,41 @@ struct PatternRecord {
 };
 
 //+------------------------------------------------------------------+
+//| Rejected Trade Record (Learning from Rejections)                  |
+//+------------------------------------------------------------------+
+struct RejectedPattern {
+   // Entry conditions (what was rejected)
+   double phi;
+   double mlProb;
+   double compression;
+   double sweeps;
+   double tfAlign;
+   double prediction;
+   int hour;
+   bool isTrending;
+   bool highVol;
+   int direction;
+   datetime rejectionTime;
+
+   // Why rejected
+   string rejectionReason;
+   bool failedPhi;
+   bool failedML;
+   bool failedPrediction;
+   bool failedSignals;
+   bool failedTime;
+   bool failedCompliance;
+
+   // What would have happened (simulated outcome)
+   double simPrice;
+   double simSL;
+   double simTP;
+   bool simulated;
+   double wouldBeProfitPoints;
+   bool wouldBeWin;
+};
+
+//+------------------------------------------------------------------+
 //| Adaptive Learning Engine                                          |
 //+------------------------------------------------------------------+
 class AdaptiveLearningEngine
@@ -38,6 +73,12 @@ class AdaptiveLearningEngine
 private:
    PatternRecord patterns[];
    int maxPatterns;
+
+   // REJECTION LEARNING
+   RejectedPattern rejectedPatterns[];
+   int maxRejectedPatterns;
+   int rejectionCount;
+   int missedOpportunityCount;  // Rejected trades that would have won
 
    // Learned optimal ranges
    double optimal_phi_min;
@@ -74,6 +115,12 @@ public:
    {
       maxPatterns = 500;
       ArrayResize(patterns, 0);
+
+      // Initialize rejection tracking
+      maxRejectedPatterns = 200;
+      ArrayResize(rejectedPatterns, 0);
+      rejectionCount = 0;
+      missedOpportunityCount = 0;
 
       // Initialize defaults
       optimal_phi_min = 0.08;
@@ -147,6 +194,245 @@ public:
    }
 
    //+------------------------------------------------------------------+
+   //| Record rejected trade opportunity (LEARNING FROM REJECTIONS)     |
+   //+------------------------------------------------------------------+
+   void RecordRejection(double phi, double mlProb, double comp, double sweep,
+                        double tfAlign, double prediction, int hour,
+                        bool trending, bool highVol, int direction,
+                        string reason, bool failedPhi, bool failedML,
+                        bool failedPrediction, bool failedSignals,
+                        bool failedTime, bool failedCompliance,
+                        double priceAtRejection = 0) // Add price parameter
+   {
+      int size = ArraySize(rejectedPatterns);
+
+      // Maintain max size
+      if(size >= maxRejectedPatterns)
+      {
+         // Remove oldest 10%
+         int removeCount = (int)(maxRejectedPatterns * 0.10);
+         for(int i = 0; i < size - removeCount; i++)
+         {
+            rejectedPatterns[i] = rejectedPatterns[i + removeCount];
+         }
+         size = size - removeCount;
+      }
+
+      ArrayResize(rejectedPatterns, size + 1);
+
+      rejectedPatterns[size].phi = phi;
+      rejectedPatterns[size].mlProb = mlProb;
+      rejectedPatterns[size].compression = comp;
+      rejectedPatterns[size].sweeps = sweep;
+      rejectedPatterns[size].tfAlign = tfAlign;
+      rejectedPatterns[size].prediction = prediction;
+      rejectedPatterns[size].hour = hour;
+      rejectedPatterns[size].isTrending = trending;
+      rejectedPatterns[size].highVol = highVol;
+      rejectedPatterns[size].direction = direction;
+      rejectedPatterns[size].rejectionTime = TimeCurrent();
+      rejectedPatterns[size].rejectionReason = reason;
+      rejectedPatterns[size].failedPhi = failedPhi;
+      rejectedPatterns[size].failedML = failedML;
+      rejectedPatterns[size].failedPrediction = failedPrediction;
+      rejectedPatterns[size].failedSignals = failedSignals;
+      rejectedPatterns[size].failedTime = failedTime;
+      rejectedPatterns[size].failedCompliance = failedCompliance;
+      rejectedPatterns[size].simPrice = priceAtRejection; // Store price for simulation
+      rejectedPatterns[size].simulated = false;
+
+      rejectionCount++;
+
+      // Debug output (if enabled externally)
+      if(learningEnabled)
+         Print("📊 REJECTION RECORDED: ", reason, " | Phi: ", phi, " ML: ", mlProb, " Pred: ", prediction);
+   }
+
+   //+------------------------------------------------------------------+
+   //| Simulate what would have happened if rejected trade was taken    |
+   //+------------------------------------------------------------------+
+   void SimulateRejectedOutcome(int rejectedIndex, double currentPrice,
+                                double atrValue, int barsSinceRejection)
+   {
+      if(rejectedIndex < 0 || rejectedIndex >= ArraySize(rejectedPatterns))
+         return;
+
+      if(rejectedPatterns[rejectedIndex].simulated)
+         return; // Already simulated
+
+      // Simulate SL/TP based on what would have been used
+      double slDistance = atrValue * 2.0; // ATR_SL_Multiplier from main EA
+      double tpDistance = slDistance * 3.0; // Base_TP_Multiplier
+
+      double simPrice = rejectedPatterns[rejectedIndex].simPrice;
+      if(simPrice == 0) return; // No price recorded
+
+      int dir = rejectedPatterns[rejectedIndex].direction;
+
+      double simSL, simTP;
+      if(dir > 0) // Would have been BUY
+      {
+         simSL = simPrice - slDistance;
+         simTP = simPrice + tpDistance;
+
+         // Check if current price hit SL or TP
+         if(currentPrice <= simSL)
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = -slDistance;
+            rejectedPatterns[rejectedIndex].wouldBeWin = false;
+         }
+         else if(currentPrice >= simTP)
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = tpDistance;
+            rejectedPatterns[rejectedIndex].wouldBeWin = true;
+            missedOpportunityCount++; // We rejected a winner!
+         }
+         else if(barsSinceRejection > 50) // Timeout
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = currentPrice - simPrice;
+            rejectedPatterns[rejectedIndex].wouldBeWin = (currentPrice > simPrice);
+            if(rejectedPatterns[rejectedIndex].wouldBeWin)
+               missedOpportunityCount++;
+         }
+         else
+         {
+            return; // Still open, don't mark simulated yet
+         }
+      }
+      else // Would have been SELL
+      {
+         simSL = simPrice + slDistance;
+         simTP = simPrice - tpDistance;
+
+         if(currentPrice >= simSL)
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = -slDistance;
+            rejectedPatterns[rejectedIndex].wouldBeWin = false;
+         }
+         else if(currentPrice <= simTP)
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = tpDistance;
+            rejectedPatterns[rejectedIndex].wouldBeWin = true;
+            missedOpportunityCount++;
+         }
+         else if(barsSinceRejection > 50)
+         {
+            rejectedPatterns[rejectedIndex].wouldBeProfitPoints = simPrice - currentPrice;
+            rejectedPatterns[rejectedIndex].wouldBeWin = (currentPrice < simPrice);
+            if(rejectedPatterns[rejectedIndex].wouldBeWin)
+               missedOpportunityCount++;
+         }
+         else
+         {
+            return;
+         }
+      }
+
+      rejectedPatterns[rejectedIndex].simulated = true;
+
+      // Debug output for missed opportunities
+      if(rejectedPatterns[rejectedIndex].wouldBeWin)
+      {
+         Print("⚠️ MISSED OPPORTUNITY: Rejected trade would have WON +",
+               rejectedPatterns[rejectedIndex].wouldBeProfitPoints,
+               " points | Reason: ", rejectedPatterns[rejectedIndex].rejectionReason);
+      }
+   }
+
+   //+------------------------------------------------------------------+
+   //| Analyze rejections to optimize thresholds                        |
+   //+------------------------------------------------------------------+
+   void AnalyzeRejections()
+   {
+      int rejSize = ArraySize(rejectedPatterns);
+      if(rejSize < 10) return; // Need minimum rejections
+
+      int simulatedCount = 0;
+      int missedWins = 0;
+      int correctRejectionsCount = 0;
+
+      // Count simulated outcomes
+      for(int i = 0; i < rejSize; i++)
+      {
+         if(rejectedPatterns[i].simulated)
+         {
+            simulatedCount++;
+            if(rejectedPatterns[i].wouldBeWin)
+               missedWins++;
+            else
+               correctRejectionsCount++;
+         }
+      }
+
+      if(simulatedCount < 10) return;
+
+      double missedWinRate = (double)missedWins / simulatedCount;
+
+      Print("REJECTION ANALYSIS:");
+      Print("  Total Rejections: ", rejectionCount);
+      Print("  Simulated Outcomes: ", simulatedCount);
+      Print("  Missed Winners: ", missedWins, " (", DoubleToString(missedWinRate * 100, 1), "%)");
+      Print("  Correct Rejections: ", correctRejectionsCount);
+
+      // If missing too many winning trades, relax thresholds
+      if(missedWinRate > 0.40) // Missing 40%+ winners
+      {
+         Print("⚠️ WARNING: Too restrictive! Missing ", DoubleToString(missedWinRate * 100, 1), "% of winning opportunities");
+         Print("  RELAXING THRESHOLDS...");
+
+         // Analyze which filter is rejecting too much
+         int phiRejects = 0, mlRejects = 0, predRejects = 0, signalRejects = 0;
+         int timeRejects = 0, complianceRejects = 0;
+
+         for(int i = 0; i < rejSize; i++)
+         {
+            if(rejectedPatterns[i].simulated && rejectedPatterns[i].wouldBeWin)
+            {
+               if(rejectedPatterns[i].failedPhi) phiRejects++;
+               if(rejectedPatterns[i].failedML) mlRejects++;
+               if(rejectedPatterns[i].failedPrediction) predRejects++;
+               if(rejectedPatterns[i].failedSignals) signalRejects++;
+               if(rejectedPatterns[i].failedTime) timeRejects++;
+               if(rejectedPatterns[i].failedCompliance) complianceRejects++;
+            }
+         }
+
+         // Relax the most problematic filter
+         if(phiRejects > missedWins * 0.3)
+         {
+            optimal_phi_min *= 0.90; // Reduce by 10%
+            Print("  ↓ Phi threshold reduced to: ", optimal_phi_min);
+         }
+         if(mlRejects > missedWins * 0.3)
+         {
+            optimal_mlProb_min *= 0.95; // Reduce by 5%
+            Print("  ↓ ML Prob threshold reduced to: ", optimal_mlProb_min);
+         }
+         if(predRejects > missedWins * 0.3)
+         {
+            Print("  ⚠️ Prediction model too conservative (rejecting ", predRejects, " winners)");
+         }
+         if(signalRejects > missedWins * 0.3)
+         {
+            optimal_compression_min *= 0.90;
+            Print("  ↓ Signal thresholds relaxed");
+         }
+         if(timeRejects > missedWins * 0.3)
+         {
+            Print("  ⚠️ Time filter rejecting ", timeRejects, " winners - consider expanding hours");
+         }
+         if(complianceRejects > missedWins * 0.3)
+         {
+            Print("  ⚠️ Compliance rules rejecting ", complianceRejects, " winners");
+         }
+      }
+      else if(missedWinRate < 0.20) // Only missing <20% winners
+      {
+         Print("✅ GOOD: Rejection filters are working well (only ", DoubleToString(missedWinRate * 100, 1), "% missed)");
+      }
+   }
+
+   //+------------------------------------------------------------------+
    //| Learn from historical patterns                                    |
    //+------------------------------------------------------------------+
    void LearnFromPatterns()
@@ -173,6 +459,9 @@ public:
 
       // Learn 4: Update prediction model
       UpdatePredictionModel();
+
+      // Learn 5: Analyze rejections (learn why not trading)
+      AnalyzeRejections();
 
       lastOptimization = TimeCurrent();
 
@@ -581,8 +870,33 @@ public:
    }
 
    //+------------------------------------------------------------------+
+   //| Get rejection statistics                                          |
+   //+------------------------------------------------------------------+
+   void GetRejectionStats(int &totalRej, int &missedOpp, double &missedRate)
+   {
+      totalRej = rejectionCount;
+      missedOpp = missedOpportunityCount;
+
+      int simulatedCount = 0;
+      int rejSize = ArraySize(rejectedPatterns);
+      for(int i = 0; i < rejSize; i++)
+      {
+         if(rejectedPatterns[i].simulated)
+            simulatedCount++;
+      }
+
+      if(simulatedCount > 0)
+         missedRate = (double)missedOpportunityCount / simulatedCount * 100.0;
+      else
+         missedRate = 0;
+   }
+
+   //+------------------------------------------------------------------+
    //| Enable/disable learning                                           |
    //+------------------------------------------------------------------+
    void SetLearningEnabled(bool enabled) { learningEnabled = enabled; }
    bool IsLearningEnabled() { return learningEnabled; }
+
+   int GetRejectionCount() { return rejectionCount; }
+   int GetMissedOpportunityCount() { return missedOpportunityCount; }
 };

@@ -55,7 +55,7 @@ input double      Breakeven_Profit_Multiplier = 0.5; // Move to BE at 0.5R
 input bool        Enable_Trailing = true;
 input double      Trail_Start_Multiplier = 1.0;    // Start trailing at 1R
 input double      Trail_Step_Multiplier = 0.3;     // Trail by 0.3R
-input bool        Enable_Debug = false;
+input bool        Enable_Debug = true;              // ENABLED for diagnostics
 input bool        Adaptive_Risk = true;            // Reduce risk after losses
 
 input group "=== Adaptive Learning ==="
@@ -447,10 +447,29 @@ double CalculateMLProbability()
 //+------------------------------------------------------------------+
 void CheckForEntry()
 {
+   // Get common data for rejection recording
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   CopyRates(_Symbol, TF_Primary, 0, 1, rates);
+   double currentPrice = rates[0].close;
+   int tentativeDirection = 0; // Will be set later
+
    // Time filtering
    if(Use_Time_Filter && !IsWithinTradingHours())
    {
       if(Enable_Debug) Print("Entry rejected - Outside trading hours");
+
+      // REJECTION LEARNING: Record time filter rejection
+      if(Enable_Learning)
+      {
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            "Outside trading hours", false, false, false, false, true, false, currentPrice);
+      }
       return;
    }
 
@@ -461,7 +480,7 @@ void CheckForEntry()
       if(timeSinceLastTrade < Trade_Cooldown_Minutes * 60)
       {
          if(Enable_Debug) Print("Entry rejected - Cooldown period");
-         return;
+         return; // Don't record cooldown rejections
       }
    }
 
@@ -473,12 +492,34 @@ void CheckForEntry()
    if(state.currentPhi < phi_threshold)
    {
       if(Enable_Debug) Print("Entry rejected - Low Phi: ", state.currentPhi, " < ", phi_threshold);
+
+      // REJECTION LEARNING: Record Phi rejection
+      if(Enable_Learning)
+      {
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            StringFormat("Low Phi: %.3f < %.3f", state.currentPhi, phi_threshold),
+            true, false, false, false, false, false, currentPrice);
+      }
       return;
    }
 
    if(state.currentDecPot < FPF_DecisionPot_Min)
    {
       if(Enable_Debug) Print("Entry rejected - Low DecPot: ", state.currentDecPot);
+
+      // REJECTION LEARNING: Record DecPot rejection
+      if(Enable_Learning)
+      {
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            StringFormat("Low DecPot: %.3f", state.currentDecPot),
+            true, false, false, false, false, false, currentPrice);
+      }
       return;
    }
 
@@ -486,6 +527,17 @@ void CheckForEntry()
    if(state.mlProbability < ml_threshold)
    {
       if(Enable_Debug) Print("Entry rejected - Low ML prob: ", state.mlProbability, " < ", ml_threshold);
+
+      // REJECTION LEARNING: Record ML rejection
+      if(Enable_Learning)
+      {
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            StringFormat("Low ML: %.3f < %.3f", state.mlProbability, ml_threshold),
+            false, true, false, false, false, false, currentPrice);
+      }
       return;
    }
 
@@ -495,6 +547,14 @@ void CheckForEntry()
       if(!learningEngine.ShouldTakeTrade(state.currentPhi, state.mlProbability, state.predictedSuccess))
       {
          if(Enable_Debug) Print("Entry rejected - Learned pattern suggests low success: ", state.predictedSuccess);
+
+         // REJECTION LEARNING: Record prediction rejection
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            StringFormat("Low prediction: %.1f%%", state.predictedSuccess * 100),
+            false, false, true, false, false, false, currentPrice);
          return;
       }
    }
@@ -520,12 +580,23 @@ void CheckForEntry()
    if(signalCount < Min_Signals_Required)
    {
       if(Enable_Debug) Print("Entry rejected - Insufficient signals: ", signalCount, " < ", Min_Signals_Required);
+
+      // REJECTION LEARNING: Record signal rejection
+      if(Enable_Learning)
+      {
+         learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+            signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+            signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+            state.isTrendingMarket, state.isHighVolatility, 1,
+            StringFormat("Insufficient signals: %d < %d", signalCount, Min_Signals_Required),
+            false, false, false, true, false, false, currentPrice);
+      }
       return;
    }
 
    // Determine direction with improved logic
    int direction = DetermineDirectionImproved();
-   if(direction == 0) return;
+   if(direction == 0) return; // Don't record direction-fail rejections
 
    // Compliance check before executing
    if(Enable_Compliance)
@@ -535,6 +606,16 @@ void CheckForEntry()
       {
          state.complianceOK = false;
          Print("COMPLIANCE VIOLATION: Trade blocked - ", compliance.GetViolationReason());
+
+         // REJECTION LEARNING: Record compliance rejection
+         if(Enable_Learning)
+         {
+            learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+               signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+               signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+               state.isTrendingMarket, state.isHighVolatility, direction,
+               compliance.GetViolationReason(), false, false, false, false, false, true, currentPrice);
+         }
          return;
       }
       state.complianceOK = true;
@@ -1050,6 +1131,19 @@ void UpdateDashboard()
       dashboard += "Prediction: " + DoubleToString(state.predictedSuccess * 100, 1) + "%" +
                    " | Learned Phi>: " + DoubleToString(state.learnedPhiMin, 3) +
                    " | ML>: " + DoubleToString(state.learnedMLProbMin, 3) + "\n";
+
+      // Show rejection learning stats
+      int rejCount, missedOpp;
+      double missedRate;
+      learningEngine.GetRejectionStats(rejCount, missedOpp, missedRate);
+      if(rejCount > 0)
+      {
+         dashboard += "Rejections: " + IntegerToString(rejCount) +
+                      " | Missed Winners: " + IntegerToString(missedOpp);
+         if(missedRate > 0)
+            dashboard += " (" + DoubleToString(missedRate, 1) + "%)";
+         dashboard += "\n";
+      }
    }
 
    dashboard += "Regime: " + (state.isTrendingMarket ? "TRENDING" : "RANGING") +
