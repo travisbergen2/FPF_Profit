@@ -1,0 +1,85 @@
+# DIAGNOSTIC SETTINGS - Force EA to Trade
+# Copy these settings to your EA inputs for testing
+
+=== FPF Core Settings ===
+FPF_Phi_Entry = 0.01          # VERY LOW (was 0.08)
+FPF_DecisionPot_Min = 0.01    # VERY LOW (was 0.06)
+ML_Entry_Threshold = 0.30     # VERY LOW (was 0.65)
+Price_Prediction_Bars = 10    # Keep default
+
+=== Risk Management ===
+Risk_Percent = 1.5            # Keep default
+Max_Daily_Loss_Percent = 10.0 # INCREASE (was 4.0)
+Max_Positions = 5             # Keep default
+ATR_SL_Multiplier = 2.0       # Keep default
+Base_TP_Multiplier = 3.0      # Keep default
+Use_Partial_TP = true         # Keep default
+Partial_TP1_Ratio = 0.4       # Keep default
+Partial_TP2_Ratio = 0.3       # Keep default
+
+=== Signal Detection ===
+ATR_Period = 14               # Keep default
+Compression_Lookback = 20     # Keep default
+Compression_Threshold = 0.40  # RELAX (was 0.25)
+Volume_MA_Period = 20         # Keep default
+Sweep_Tolerance_Points = 15   # RELAX (was 8)
+Min_Signals_Required = 1      # REDUCE (was 2)
+
+=== Timeframe Settings ===
+TF_Primary = PERIOD_M15       # Keep default
+TF_Secondary = PERIOD_M5      # Keep default
+TF_Tertiary = PERIOD_M1       # Keep default
+
+=== Time Filtering ===
+Use_Time_Filter = false       # DISABLED (keep)
+Trade_Start_Hour = 2          # N/A when disabled
+Trade_End_Hour = 16           # N/A when disabled
+Trade_Cooldown_Minutes = 0    # DISABLE COOLDOWN (was 30)
+
+=== Advanced ===
+Enable_Breakeven = true       # Keep default
+Breakeven_Profit_Multiplier = 0.5  # Keep default
+Enable_Trailing = true        # Keep default
+Trail_Start_Multiplier = 1.0  # Keep default
+Trail_Step_Multiplier = 0.3   # Keep default
+Enable_Debug = true           # KEEP ON (critical!)
+Adaptive_Risk = true          # Keep default
+
+=== Adaptive Learning ===
+Enable_Learning = false       # DISABLE FOR TEST
+Use_Learned_Thresholds = false # DISABLE FOR TEST
+Use_Predictions = false       # DISABLE FOR TEST
+Min_Learning_Samples = 20     # N/A when disabled
+
+=== Compliance ===
+Enable_Compliance = false     # DISABLE FOR TEST
+Max_Trades_Per_Hour = 10      # N/A when disabled
+Max_Daily_Trades = 50         # N/A when disabled
+Max_Rapid_Reversals = 3       # N/A when disabled
+Min_Hold_Time_Sec = 60        # N/A when disabled
+
+=== What This Does ===
+✅ Removes learning gates (no ShouldTakeTrade blocks)
+✅ Removes compliance gates (no rate limiting)
+✅ Lowers FPF thresholds to near-zero
+✅ Reduces signal requirements to just 1
+✅ Removes cooldown period
+✅ Relaxes signal detection thresholds
+✅ Keeps debug ON to see what happens
+
+=== Expected Result ===
+With these settings on a volatile pair (XAUUSD, BTCUSD):
+- Should see trades within first few hours
+- Will see EVERY rejection reason in Experts log
+- Will prove EA CAN execute orders
+
+=== After Testing ===
+Once you see trades, gradually tighten:
+1. Min_Signals_Required: 1 → 2
+2. FPF_Phi_Entry: 0.01 → 0.05 → 0.08
+3. ML_Entry_Threshold: 0.30 → 0.50 → 0.65
+4. Enable_Learning: false → true
+5. Enable_Compliance: false → true
+6. Trade_Cooldown_Minutes: 0 → 15 → 30
+
+Find the sweet spot between quality and quantity.
