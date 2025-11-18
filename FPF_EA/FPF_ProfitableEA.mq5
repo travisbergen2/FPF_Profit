@@ -78,13 +78,15 @@ RiskManager riskMgr;
 ComplianceMonitor compliance;
 AdaptiveLearningEngine learningEngine;
 
+//--- Global rolling accuracy array (can't be in struct)
+double rollingAccuracy[];
+
 //--- Trading State
 struct TradingState {
    double dayStartBalance;
    int tradesWon;
    int tradesLost;
    datetime lastTradeTime;
-   double[] rollingAccuracy;
    bool tradingEnabled;
    datetime lastMLUpdate;
    double currentPhi;
@@ -158,8 +160,8 @@ int OnInit()
    state.lastTradeTicket = 0;
    state.lastTradeOpenTime = 0;
    state.lastTradeOpenPrice = 0;
-   ArrayResize(state.rollingAccuracy, 50);
-   ArrayInitialize(state.rollingAccuracy, 0.5);
+   ArrayResize(rollingAccuracy, 50);
+   ArrayInitialize(rollingAccuracy, 0.5);
 
    Print("===========================================");
    Print("FPF OPTIMIZED EA v2.1 - FULLY INITIALIZED");
@@ -368,12 +370,12 @@ void UpdateMLGating()
    // Calculate rolling accuracy
    int total = 0;
    int wins = 0;
-   for(int i = 0; i < ArraySize(state.rollingAccuracy); i++)
+   for(int i = 0; i < ArraySize(rollingAccuracy); i++)
    {
-      if(state.rollingAccuracy[i] > 0)
+      if(rollingAccuracy[i] > 0)
       {
          total++;
-         wins += (int)state.rollingAccuracy[i];
+         wins += (int)rollingAccuracy[i];
       }
    }
    
@@ -543,119 +545,6 @@ void CheckForEntry()
 }
 
 //+------------------------------------------------------------------+
-//| Determine Trade Direction                                          |
-//+------------------------------------------------------------------+
-int DetermineDirection()
-{
-   // Get EMA values using handles
-   double ema_fast_pri[], ema_slow_pri[], ema_fast_sec[], ema_slow_sec[];
-   ArraySetAsSeries(ema_fast_pri, true);
-   ArraySetAsSeries(ema_slow_pri, true);
-   ArraySetAsSeries(ema_fast_sec, true);
-   ArraySetAsSeries(ema_slow_sec, true);
-   
-   // Primary timeframe
-   int h_ema_fast_pri = iMA(_Symbol, TF_Primary, 12, 0, MODE_EMA, PRICE_CLOSE);
-   int h_ema_slow_pri = iMA(_Symbol, TF_Primary, 26, 0, MODE_EMA, PRICE_CLOSE);
-   
-   if(h_ema_fast_pri == INVALID_HANDLE || h_ema_slow_pri == INVALID_HANDLE)
-      return 0;
-   
-   CopyBuffer(h_ema_fast_pri, 0, 0, 1, ema_fast_pri);
-   CopyBuffer(h_ema_slow_pri, 0, 0, 1, ema_slow_pri);
-   
-   // Secondary timeframe
-   int h_ema_fast_sec = iMA(_Symbol, TF_Secondary, 12, 0, MODE_EMA, PRICE_CLOSE);
-   int h_ema_slow_sec = iMA(_Symbol, TF_Secondary, 26, 0, MODE_EMA, PRICE_CLOSE);
-   
-   if(h_ema_fast_sec == INVALID_HANDLE || h_ema_slow_sec == INVALID_HANDLE)
-   {
-      IndicatorRelease(h_ema_fast_pri);
-      IndicatorRelease(h_ema_slow_pri);
-      return 0;
-   }
-   
-   CopyBuffer(h_ema_fast_sec, 0, 0, 1, ema_fast_sec);
-   CopyBuffer(h_ema_slow_sec, 0, 0, 1, ema_slow_sec);
-   
-   // Get current price
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   CopyRates(_Symbol, TF_Primary, 0, 1, rates);
-   double price = rates[0].close;
-   
-   // Check alignment
-   bool bullishPrimary = ema_fast_pri[0] > ema_slow_pri[0];
-   bool bullishSecondary = ema_fast_sec[0] > ema_slow_sec[0];
-   bool priceAboveEMA = price > ema_fast_pri[0];
-   
-   bool bearishPrimary = ema_fast_pri[0] < ema_slow_pri[0];
-   bool bearishSecondary = ema_fast_sec[0] < ema_slow_sec[0];
-   bool priceBelowEMA = price < ema_fast_pri[0];
-   
-   // Additional FPF bias
-   double fpfBias = fpf.GetPhi(1.0);
-   
-   // Release handles
-   IndicatorRelease(h_ema_fast_pri);
-   IndicatorRelease(h_ema_slow_pri);
-   IndicatorRelease(h_ema_fast_sec);
-   IndicatorRelease(h_ema_slow_sec);
-   
-   if(bullishPrimary && bullishSecondary && priceAboveEMA && fpfBias > 0)
-      return 1;  // Buy
-   
-   if(bearishPrimary && bearishSecondary && priceBelowEMA && fpfBias < 0)
-      return -1; // Sell
-   
-   return 0; // No clear direction
-}
-
-//+------------------------------------------------------------------+
-//| Execute Trade                                                      |
-//+------------------------------------------------------------------+
-void ExecuteTrade(int direction)
-{
-   double lotSize = riskMgr.CalculateLotSize(_Symbol, Base_SL_Points);
-   if(lotSize <= 0) return;
-   
-   double price = (direction > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
-                                     SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   double sl, tp;
-   riskMgr.CalculateSLTP(_Symbol, direction, price, Base_SL_Points, sl, tp);
-   
-   MqlTradeRequest request = {};
-   MqlTradeResult result = {};
-   
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = _Symbol;
-   request.volume = lotSize;
-   request.type = (direction > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   request.price = price;
-   request.sl = sl;
-   request.tp = tp;
-   request.deviation = 10;
-   request.magic = MAGIC_NUMBER;
-   request.comment = StringFormat("FPF_ML:%.2f_Phi:%.2f", state.mlProbability, state.currentPhi);
-   
-   if(OrderSend(request, result))
-   {
-      if(result.retcode == TRADE_RETCODE_DONE)
-      {
-         Print("Trade opened successfully - Ticket: ", result.order, 
-               " Direction: ", (direction > 0 ? "BUY" : "SELL"),
-               " ML Prob: ", state.mlProbability);
-         state.lastTradeTime = TimeCurrent();
-      }
-      else
-      {
-         Print("Trade failed - Return code: ", result.retcode);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
 //| Manage Positions                                                   |
 //+------------------------------------------------------------------+
 void ManagePositions()
@@ -757,11 +646,11 @@ void OnTrade()
 
                // Update rolling accuracy
                bool isWin = profit > 0;
-               for(int i = ArraySize(state.rollingAccuracy) - 1; i > 0; i--)
+               for(int i = ArraySize(rollingAccuracy) - 1; i > 0; i--)
                {
-                  state.rollingAccuracy[i] = state.rollingAccuracy[i-1];
+                  rollingAccuracy[i] = rollingAccuracy[i-1];
                }
-               state.rollingAccuracy[0] = isWin ? 1.0 : 0.0;
+               rollingAccuracy[0] = isWin ? 1.0 : 0.0;
 
                // Update FPF plasticity
                double reward = MathTanh(profit / 1000.0);
@@ -1131,7 +1020,10 @@ void ClosePartialPosition(ulong ticket, double volume, string reason)
    request.magic = MAGIC_NUMBER;
    request.comment = reason;
 
-   OrderSend(request, result);
+   if(!OrderSend(request, result))
+   {
+      Print("Partial close failed - Error: ", result.retcode);
+   }
 }
 
 //+------------------------------------------------------------------+

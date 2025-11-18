@@ -310,7 +310,7 @@ public:
             tradeHistory[i].direction == -direction)
          {
             // Found opposite trade within 1 minute
-            double timeDiff = now - tradeHistory[i].closeTime;
+            double timeDiff = (double)(now - tradeHistory[i].closeTime);
             if(timeDiff < minHoldingTimeSec)
             {
                Print("COMPLIANCE: Self-trading detected - opposite trade within ", timeDiff, " seconds");
