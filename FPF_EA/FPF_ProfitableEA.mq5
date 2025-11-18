@@ -161,7 +161,7 @@ int OnInit()
    state.lastTradeOpenTime = 0;
    state.lastTradeOpenPrice = 0;
    ArrayResize(rollingAccuracy, 50);
-   ArrayInitialize(rollingAccuracy, 0.5);
+   ArrayInitialize(rollingAccuracy, -1);  // -1 = no trade yet (not 0.5!)
 
    Print("==========================================================");
    Print("FPF EA v2.3 - 7 SIGNALS INTEGRATED + MARKET TIME MODE");
@@ -208,13 +208,19 @@ void OnTick()
    
    // Manage existing positions
    ManagePositions();
-   
-   // Check for new entries if trading enabled
+
+   // ALWAYS check for entries (even if disabled) to enable rejection learning!
+   // This lets the EA learn from missed opportunities even during bootstrap
    if(state.tradingEnabled && riskMgr.CanOpenPosition())
    {
-      CheckForEntry();
+      CheckForEntry();  // Normal trading
    }
-   
+   else if(Enable_Learning)
+   {
+      // Trading disabled but learning enabled - record what we're missing!
+      RecordRejectionDuringDisabled();
+   }
+
    // Update dashboard
    UpdateDashboard();
 }
@@ -244,13 +250,29 @@ void UpdateFPFState()
    // Compute volatility-scaled noise (novelty)
    double An = ComputeNoveltyNoise();
 
+   // Safety check for inputs
+   if(!MathIsValidNumber(Ae)) Ae = 0;
+   if(!MathIsValidNumber(An)) An = 0;
+
    // Update FPF with RK4 integration
    double dt = 1.0;
    fpf.UpdateP_RK4(Ae, An, dt);
 
-   // Calculate projection metrics
+   // Calculate projection metrics with NaN protection
    state.currentPhi = fpf.GetPhi(1.0);
    state.currentDecPot = fpf.GetDecisionPotential(0.5);
+
+   // Safety check for NaN results
+   if(!MathIsValidNumber(state.currentPhi) || state.currentPhi < 0)
+   {
+      state.currentPhi = 0.05;  // Safe minimum
+      if(Enable_Debug) Print("⚠️ FPF Phi returned NaN - using default 0.05");
+   }
+   if(!MathIsValidNumber(state.currentDecPot) || state.currentDecPot < 0)
+   {
+      state.currentDecPot = 0.05;  // Safe minimum
+      if(Enable_Debug) Print("⚠️ FPF DecPot returned NaN - using default 0.05");
+   }
 
    // Update adaptive risk
    UpdateAdaptiveRisk();
@@ -348,12 +370,21 @@ double ComputeEmotiveForce()
                              spreadNarrow * 0.10 +     // Spread narrowing shows calm before storm
                              tfAlign * 0.20);          // TF alignment shows conviction
 
+   // Safety checks for invalid values
+   if(!MathIsValidNumber(momentum)) momentum = 0;
+   if(!MathIsValidNumber(volRatio)) volRatio = 0;
+   if(!MathIsValidNumber(volSpike)) volSpike = 1.0;
+   if(!MathIsValidNumber(bigMovePressure)) bigMovePressure = 0;
+
    // Combine traditional momentum + volume + BIG MOVE SIGNALS
    // This is the KEY INNOVATION - FPF now "feels" pre-move conditions!
    double Ae = MathTanh(momentum * 10.0) *              // Directional momentum
                volRatio *                                // Volatility pressure
                MathMin(volSpike, 2.0) *                 // Volume spike
                (1.0 + bigMovePressure * 2.0);           // BIG MOVE AMPLIFIER (up to 3x)
+
+   // Final safety check
+   if(!MathIsValidNumber(Ae)) Ae = 0;
 
    if(Enable_Debug)
    {
@@ -403,18 +434,19 @@ double ComputeNoveltyNoise()
 //+------------------------------------------------------------------+
 void UpdateMLGating()
 {
-   // Calculate rolling accuracy
+   // Calculate rolling accuracy (-1 = no trade, 0 = loss, 1 = win)
    int total = 0;
    int wins = 0;
    for(int i = 0; i < ArraySize(rollingAccuracy); i++)
    {
-      if(rollingAccuracy[i] > 0)
+      if(rollingAccuracy[i] >= 0)  // Only count actual trades (0 or 1)
       {
          total++;
          wins += (int)rollingAccuracy[i];
       }
    }
-   
+
+   // Bootstrap: If no trades yet, assume 75% accuracy to allow trading
    double accuracy = (total > 0) ? ((double)wins / total) : 0.75;
    
    // Calculate ML probability based on FPF state and signals
@@ -476,6 +508,60 @@ double CalculateMLProbability()
    probability = MathMax(0.0, MathMin(1.0, probability));
 
    return probability;
+}
+
+//+------------------------------------------------------------------+
+//| Record rejection when trading is disabled (LEARNING FROM PAUSE)   |
+//+------------------------------------------------------------------+
+void RecordRejectionDuringDisabled()
+{
+   // This function records "missed" opportunities when trading is disabled
+   // due to low accuracy or other system-level blocks
+
+   // Get common data
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   CopyRates(_Symbol, TF_Primary, 0, 1, rates);
+   double currentPrice = rates[0].close;
+
+   // Check if this would have been a valid entry (if trading was enabled)
+   // Skip all the usual filters, just check if signals are present
+
+   // Update signal detector
+   signalDetector.Update(_Symbol, TF_Primary);
+
+   bool compressionDetected = signalDetector.IsCompressionDetected();
+   bool sweepsDetected = signalDetector.AreSweepsDetected();
+   bool stopHuntDetected = signalDetector.IsStopHuntDetected();
+   bool wickTestDetected = signalDetector.IsWickTestDetected();
+   bool tfAlignment = signalDetector.IsTimeframeAligned();
+
+   int signalCount = 0;
+   if(compressionDetected) signalCount++;
+   if(sweepsDetected) signalCount++;
+   if(stopHuntDetected) signalCount++;
+   if(wickTestDetected) signalCount++;
+   if(tfAlignment) signalCount++;
+
+   // Only record if there were actual signals (a real opportunity)
+   if(signalCount >= Min_Signals_Required &&
+      state.currentPhi >= FPF_Phi_Entry * 0.8 &&  // Close to threshold
+      state.mlProbability >= ML_Entry_Threshold * 0.8)
+   {
+      // This was a real opportunity we missed due to being disabled!
+      learningEngine.RecordRejection(state.currentPhi, state.mlProbability,
+         signalDetector.GetCompressionScore(), signalDetector.GetSweepScore(),
+         signalDetector.GetTimeframeAlignment(), state.predictedSuccess, dt.hour,
+         state.isTrendingMarket, state.isHighVolatility, 1,
+         "Trading DISABLED - Low accuracy (bootstrap phase)",
+         false, false, false, false, false, false, currentPrice);
+
+      if(Enable_Debug)
+         Print("📊 OPPORTUNITY MISSED: Trading disabled but ", signalCount,
+               " signals detected | Phi: ", state.currentPhi, " ML: ", state.mlProbability);
+   }
 }
 
 //+------------------------------------------------------------------+
