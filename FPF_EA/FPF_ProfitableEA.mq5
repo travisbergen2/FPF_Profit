@@ -7,9 +7,9 @@
 #property version   "2.00"
 #property strict
 
-#include <FPF_Engine.mqh>
-#include <BigMoveSignals.mqh>
-#include <RiskManager.mqh>
+#include "Include/FPF_Engine.mqh"
+#include "Include/BigMoveSignals.mqh"
+#include "Include/RiskManager.mqh"
 
 //--- Input Parameters
 input group "=== FPF Core Settings ==="
