@@ -13,16 +13,18 @@
 
 //--- Input Parameters
 input group "=== FPF Core Settings ==="
-input double      FPF_Phi_Entry = 0.08;           // Min Phi for entry (lowered from 0.12)
-input double      FPF_DecisionPot_Min = 0.05;     // Min decision potential (lowered from 0.10)
-input double      ML_Entry_Threshold = 0.55;      // ML probability threshold (lowered from 0.75)
-input double      ML_Stop_Accuracy = 0.35;        // Stop trading if accuracy drops below (lowered from 0.45)
+input double      FPF_Phi_Entry = 0.10;           // Min Phi for entry (Conservative: raised to 0.10)
+input double      FPF_DecisionPot_Min = 0.05;     // Min decision potential
+input double      ML_Entry_Threshold = 0.62;      // ML probability threshold (Conservative: raised to 0.62)
+input double      ML_Stop_Accuracy = 0.35;        // Stop trading if accuracy drops below
 input int         ML_Min_Trades_For_Check = 20;   // Minimum trades before enforcing accuracy check
+input int         Min_Signals_Required = 3;       // Minimum signals for entry (Conservative: 3)
+input double      ADX_Min_Threshold = 22.0;       // Minimum ADX for trend filter
 
 input group "=== Risk Management ==="
-input double      Risk_Percent = 1.0;              // Risk per trade %
+input double      Risk_Percent = 0.5;              // Risk per trade % (Conservative: 0.5%)
 input double      Max_Daily_Loss_Percent = 3.0;   // Max daily loss %
-input int         Max_Positions = 3;               // Max concurrent positions
+input int         Max_Positions = 1;               // Max concurrent positions (Conservative: 1)
 input double      Base_SL_Points = 150;            // Base stop loss points
 input double      Base_TP_Multiplier = 2.5;       // TP multiplier (R:R)
 
@@ -40,11 +42,11 @@ input ENUM_TIMEFRAMES TF_Tertiary = PERIOD_M1;
 
 input group "=== Advanced ==="
 input bool        Enable_Breakeven = true;
-input double      Breakeven_Profit_Points = 100;
+input double      Breakeven_Profit_Points = 150;  // Conservative: moved to 150 to reduce BE whipsaws
 input bool        Enable_Trailing = true;
-input double      Trail_Start_Points = 150;
-input double      Trail_Step_Points = 50;
-input bool        Enable_Debug = true;           // ENABLED for debugging
+input double      Trail_Start_Points = 220;       // Conservative: moved to 220 to preserve winners
+input double      Trail_Step_Points = 80;         // Conservative: looser trail (80 points)
+input bool        Enable_Debug = true;            // ENABLED for debugging
 
 //--- Global Objects
 FractalPersonalityField fpf;
@@ -93,10 +95,14 @@ int OnInit()
    state.lastTradeTime = 0;
    ArrayInitialize(state.rollingAccuracy, -1.0);  // -1 = no trade yet
    
-   Print("FPF Profitable EA Initialized Successfully");
+   Print("=== FPF Profitable EA Initialized (CONSERVATIVE PRESET) ===");
+   Print("FPF Entry Filters: Phi >= ", FPF_Phi_Entry, " | DecPot >= ", FPF_DecisionPot_Min);
    Print("ML Entry Threshold: ", ML_Entry_Threshold);
-   Print("ML Stop Accuracy: ", ML_Stop_Accuracy);
-   Print("ML Min Trades For Check: ", ML_Min_Trades_For_Check);
+   Print("Min Signals Required: ", Min_Signals_Required);
+   Print("ADX Minimum: ", ADX_Min_Threshold, " (Regime filter)");
+   Print("Risk Management: ", Risk_Percent, "% per trade | Max Positions: ", Max_Positions);
+   Print("Trade Management: BE @ ", Breakeven_Profit_Points, " pts | Trail @ ", Trail_Start_Points, " pts (step ", Trail_Step_Points, ")");
+   Print("ML Stop Accuracy: ", ML_Stop_Accuracy, " | Min Trades: ", ML_Min_Trades_For_Check);
    
    return(INIT_SUCCEEDED);
 }
@@ -377,7 +383,35 @@ void CheckForEntry()
       if(Enable_Debug) Print("Entry rejected - Low ML prob: ", state.mlProbability);
       return;
    }
-   
+
+   // Regime filter - ADX check to ensure we're in trending market
+   double adx_buffer[];
+   ArraySetAsSeries(adx_buffer, true);
+   int h_adx = iADX(_Symbol, TF_Primary, 14);
+   if(h_adx == INVALID_HANDLE)
+   {
+      if(Enable_Debug) Print("Entry rejected - ADX handle invalid");
+      return;
+   }
+
+   if(CopyBuffer(h_adx, 0, 0, 1, adx_buffer) <= 0)
+   {
+      IndicatorRelease(h_adx);
+      if(Enable_Debug) Print("Entry rejected - ADX buffer copy failed");
+      return;
+   }
+
+   double adx_value = adx_buffer[0];
+   IndicatorRelease(h_adx);
+
+   if(adx_value < ADX_Min_Threshold)
+   {
+      if(Enable_Debug) Print("Entry rejected - ADX too low: ", DoubleToString(adx_value, 1), " < ", ADX_Min_Threshold, " (ranging market)");
+      return;
+   }
+
+   if(Enable_Debug) Print("ADX Check PASSED: ", DoubleToString(adx_value, 1), " >= ", ADX_Min_Threshold);
+
    // Detect big move signals
    signalDetector.Update(_Symbol, TF_Primary);
 
@@ -406,9 +440,9 @@ void CheckForEntry()
    if(wickTestDetected) signalCount++;
    if(tfAlignment) signalCount++;
 
-   if(signalCount < 2)  // Lowered from 3 to 2 for more trade opportunities
+   if(signalCount < Min_Signals_Required)
    {
-      if(Enable_Debug) Print("Entry rejected - Insufficient signals: ", signalCount);
+      if(Enable_Debug) Print("Entry rejected - Insufficient signals: ", signalCount, " (Required: ", Min_Signals_Required, ")");
       return;
    }
    
