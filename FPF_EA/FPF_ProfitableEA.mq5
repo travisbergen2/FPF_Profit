@@ -296,25 +296,41 @@ double CalculateMLProbability()
    double align = fpf.P[fpf.P_ALIGN];
    double S_val = fpf.P[fpf.P_S];
    double A_val = fpf.P[fpf.P_A];
-   
+
+   // Check for NaN in FPF values
+   if(coh != coh || align != align || S_val != S_val || A_val != A_val)
+   {
+      if(Enable_Debug)
+         Print("WARNING: NaN in FPF state values, returning probability 0.0");
+      return 0.0;
+   }
+
    // Get signal strengths
    double compressionScore = signalDetector.GetCompressionScore();
    double sweepScore = signalDetector.GetSweepScore();
    double stopHuntScore = signalDetector.GetStopHuntScore();
    double wickScore = signalDetector.GetWickScore();
    double tfAlignScore = signalDetector.GetTimeframeAlignment();
-   
+
    // Combine features (simplified ML model)
-   double signalStrength = (compressionScore * 0.25 + sweepScore * 0.20 + 
-                            stopHuntScore * 0.15 + wickScore * 0.15 + 
+   double signalStrength = (compressionScore * 0.25 + sweepScore * 0.20 +
+                            stopHuntScore * 0.15 + wickScore * 0.15 +
                             tfAlignScore * 0.25);
-   
+
    double fpfStrength = (coh * 0.30 + align * 0.20 + S_val * 0.30 - A_val * 0.20);
-   
+
    // Final probability
    double probability = (signalStrength * 0.60 + fpfStrength * 0.40);
    probability = MathMax(0.0, MathMin(1.0, probability));
-   
+
+   // Final NaN check
+   if(probability != probability)
+   {
+      if(Enable_Debug)
+         Print("WARNING: NaN in calculated probability, returning 0.0");
+      return 0.0;
+   }
+
    return probability;
 }
 

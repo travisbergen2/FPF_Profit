@@ -63,26 +63,49 @@ public:
    {
       double balance = AccountInfoDouble(ACCOUNT_BALANCE);
       double risk_amount = balance * (risk_percent / 100.0);
-      
+
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
       double tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
       double tick_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
-      
+
       double min_lot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
       double max_lot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
       double lot_step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-      
-      // Calculate lot size
-      double sl_in_currency = (sl_points * point) * (tick_value / tick_size);
+
+      // Safety check for invalid values
+      if(sl_points <= 0 || point <= 0 || tick_value <= 0 || tick_size <= 0)
+      {
+         Print("ERROR: Invalid symbol info - returning min lot");
+         return min_lot;
+      }
+
+      // Calculate lot size using corrected formula
+      double sl_in_currency = sl_points * point * (tick_value / tick_size);
+
+      // Safety check to prevent division by very small number
+      if(sl_in_currency < 0.01)
+      {
+         Print("WARNING: SL in currency too small (", sl_in_currency, "), using min lot");
+         return min_lot;
+      }
+
       double lot_size = risk_amount / sl_in_currency;
-      
-      // Normalize to lot step
+
+      // Normalize to lot step before clamping
       lot_size = MathFloor(lot_size / lot_step) * lot_step;
-      
+
       // Clamp to broker limits
       if(lot_size < min_lot) lot_size = min_lot;
       if(lot_size > max_lot) lot_size = max_lot;
-      
+
+      // Extra safety: Cap at reasonable multiple of min lot
+      double max_reasonable_lot = min_lot * 100;
+      if(lot_size > max_reasonable_lot)
+      {
+         Print("WARNING: Calculated lot size (", lot_size, ") exceeds reasonable limit, capping to ", max_reasonable_lot);
+         lot_size = max_reasonable_lot;
+      }
+
       // Reduce size based on current positions (scaling down)
       int current_positions = PositionsTotal();
       if(current_positions > 0)
@@ -90,7 +113,7 @@ public:
          double scale_factor = 1.0 - (current_positions * 0.2);
          lot_size *= MathMax(scale_factor, 0.4);
       }
-      
+
       return NormalizeLot(symbol, lot_size);
    }
    

@@ -241,38 +241,53 @@ public:
    void UpdateP_RK4(double Ae, double An, double useDt = -1.0)
    {
       if(useDt < 0) useDt = dt_default;
-      
+
       double k1[6], k2[6], k3[6], k4[6];
       double temp[6];
-      
+
       // k1 = f(P)
       ComputeDerivatives(P, Ae, An, k1);
-      
+
       // k2 = f(P + dt/2 * k1)
       for(int i = 0; i < 6; i++)
+      {
          temp[i] = P[i] + 0.5 * useDt * k1[i];
+         temp[i] = ClampVal(temp[i], -maxP, maxP);  // Clamp intermediate values
+      }
       ComputeDerivatives(temp, Ae, An, k2);
-      
+
       // k3 = f(P + dt/2 * k2)
       for(int i = 0; i < 6; i++)
+      {
          temp[i] = P[i] + 0.5 * useDt * k2[i];
+         temp[i] = ClampVal(temp[i], -maxP, maxP);  // Clamp intermediate values
+      }
       ComputeDerivatives(temp, Ae, An, k3);
-      
+
       // k4 = f(P + dt * k3)
       for(int i = 0; i < 6; i++)
+      {
          temp[i] = P[i] + useDt * k3[i];
+         temp[i] = ClampVal(temp[i], -maxP, maxP);  // Clamp intermediate values
+      }
       ComputeDerivatives(temp, Ae, An, k4);
-      
+
       // Update: P = P + dt/6 * (k1 + 2*k2 + 2*k3 + k4)
       for(int i = 0; i < 6; i++)
       {
          P[i] = P[i] + (useDt / 6.0) * (k1[i] + 2.0*k2[i] + 2.0*k3[i] + k4[i]);
-         
+
          // Clamp to prevent explosion
-         if(P[i] > maxP) P[i] = maxP;
-         if(P[i] < -maxP) P[i] = -maxP;
+         P[i] = ClampVal(P[i], -maxP, maxP);
+
+         // Check for NaN and reset if found
+         if(P[i] != P[i])  // NaN check (NaN != NaN is true)
+         {
+            Print("WARNING: NaN detected in P[", i, "], resetting to 0");
+            P[i] = 0.0;
+         }
       }
-      
+
       if(debugLog) DebugLogState();
    }
    
@@ -310,14 +325,28 @@ public:
       v[P_A] = -0.20;
       v[P_MEM] = 0.0;
       v[P_EXP] = 0.10;
-      
+
       double phi_result = 0.0;
       for(int i = 0; i < 6; i++)
       {
+         // Check for NaN in P array
+         if(P[i] != P[i])
+         {
+            Print("WARNING: NaN in P[", i, "] during GetPhi");
+            return 0.0;
+         }
          phi_result += v[i] * P[i];
       }
-      
+
       phi_result *= confidenceWeight;
+
+      // Final NaN check
+      if(phi_result != phi_result)
+      {
+         Print("WARNING: NaN result in GetPhi");
+         return 0.0;
+      }
+
       return phi_result;
    }
    
@@ -326,8 +355,24 @@ public:
    //+------------------------------------------------------------------+
    double GetDecisionPotential(double penalty = 0.5)
    {
+      // Check for NaN
+      if(P[P_S] != P[P_S] || P[P_A] != P[P_A])
+      {
+         Print("WARNING: NaN in P[P_S] or P[P_A] during GetDecisionPotential");
+         return 0.0;
+      }
+
       // S - penalty * A (resonance minus rotation)
-      return (P[P_S] - penalty * P[P_A]);
+      double result = P[P_S] - penalty * P[P_A];
+
+      // Final NaN check
+      if(result != result)
+      {
+         Print("WARNING: NaN result in GetDecisionPotential");
+         return 0.0;
+      }
+
+      return result;
    }
    
    //+------------------------------------------------------------------+
