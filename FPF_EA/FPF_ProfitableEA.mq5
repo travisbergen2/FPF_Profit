@@ -16,7 +16,8 @@ input group "=== FPF Core Settings ==="
 input double      FPF_Phi_Entry = 0.08;           // Min Phi for entry (lowered from 0.12)
 input double      FPF_DecisionPot_Min = 0.05;     // Min decision potential (lowered from 0.10)
 input double      ML_Entry_Threshold = 0.55;      // ML probability threshold (lowered from 0.75)
-input double      ML_Stop_Accuracy = 0.45;        // Stop trading if accuracy drops below (lowered from 0.60)
+input double      ML_Stop_Accuracy = 0.35;        // Stop trading if accuracy drops below (lowered from 0.45)
+input int         ML_Min_Trades_For_Check = 20;   // Minimum trades before enforcing accuracy check
 
 input group "=== Risk Management ==="
 input double      Risk_Percent = 1.0;              // Risk per trade %
@@ -95,6 +96,7 @@ int OnInit()
    Print("FPF Profitable EA Initialized Successfully");
    Print("ML Entry Threshold: ", ML_Entry_Threshold);
    Print("ML Stop Accuracy: ", ML_Stop_Accuracy);
+   Print("ML Min Trades For Check: ", ML_Min_Trades_For_Check);
    
    return(INIT_SUCCEEDED);
 }
@@ -272,17 +274,25 @@ void UpdateMLGating()
    state.mlProbability = CalculateMLProbability();
 
    // Gate trading based on accuracy and probability
-   if(accuracy < ML_Stop_Accuracy)
+   // Only enforce accuracy check after minimum number of trades
+   if(total >= ML_Min_Trades_For_Check && accuracy < ML_Stop_Accuracy)
    {
       state.tradingEnabled = false;
       if(Enable_Debug)
-         Print("Trading DISABLED - Accuracy: ", DoubleToString(accuracy * 100, 1), "% < ", DoubleToString(ML_Stop_Accuracy * 100, 1), "%");
+         Print("Trading DISABLED - Accuracy: ", DoubleToString(accuracy * 100, 1), "% < ", DoubleToString(ML_Stop_Accuracy * 100, 1), "% (", total, " trades)");
    }
    else
    {
       state.tradingEnabled = true;
-      if(Enable_Debug && total == 0)
-         Print("Trading ENABLED - No trades yet, using default accuracy assumption");
+      if(Enable_Debug)
+      {
+         if(total == 0)
+            Print("Trading ENABLED - No trades yet, using default accuracy assumption");
+         else if(total < ML_Min_Trades_For_Check)
+            Print("Trading ENABLED - Sample size too small (", total, "/", ML_Min_Trades_For_Check, " trades), continuing");
+         else
+            Print("Trading ENABLED - Accuracy acceptable: ", DoubleToString(accuracy * 100, 1), "%");
+      }
    }
 }
 
