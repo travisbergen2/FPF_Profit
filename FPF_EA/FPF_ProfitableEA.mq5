@@ -56,7 +56,7 @@ struct TradingState {
    int tradesWon;
    int tradesLost;
    datetime lastTradeTime;
-   double[] rollingAccuracy;
+   double rollingAccuracy[50];  // Fixed-size array (MQL5 doesn't support dynamic arrays in structs)
    bool tradingEnabled;
    datetime lastMLUpdate;
    double currentPhi;
@@ -90,7 +90,6 @@ int OnInit()
    state.tradesLost = 0;
    state.tradingEnabled = true;
    state.lastTradeTime = 0;
-   ArrayResize(state.rollingAccuracy, 50);
    ArrayInitialize(state.rollingAccuracy, 0.5);
    
    Print("FPF Profitable EA Initialized Successfully");
