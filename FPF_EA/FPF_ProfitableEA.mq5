@@ -505,8 +505,15 @@ void MakePricePredictionAndLearn()
 
       if(barsPassed >= predictions[i].barsAhead)
       {
-         // Time to verify!
-         double actualPrice = rates[barsPassed].close;
+         // Time to verify! Need to fetch the specific historical bar
+         MqlRates histRates[];
+         ArraySetAsSeries(histRates, true);
+
+         // Copy the specific bar when prediction should have materialized
+         if(CopyRates(_Symbol, TF_Primary, barsPassed, 1, histRates) < 1)
+            continue; // Skip if can't get historical data
+
+         double actualPrice = histRates[0].close;
          predictions[i].actualPrice = actualPrice;
          predictions[i].error = MathAbs(actualPrice - predictions[i].predictedPrice);
          predictions[i].verified = true;
