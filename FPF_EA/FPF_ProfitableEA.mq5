@@ -90,7 +90,7 @@ int OnInit()
    state.tradesLost = 0;
    state.tradingEnabled = true;
    state.lastTradeTime = 0;
-   ArrayInitialize(state.rollingAccuracy, 0.5);
+   ArrayInitialize(state.rollingAccuracy, -1.0);  // -1 = no trade yet
    
    Print("FPF Profitable EA Initialized Successfully");
    Print("ML Entry Threshold: ", ML_Entry_Threshold);
@@ -253,28 +253,36 @@ void UpdateMLGating()
    int wins = 0;
    for(int i = 0; i < ArraySize(state.rollingAccuracy); i++)
    {
-      if(state.rollingAccuracy[i] > 0)
+      if(state.rollingAccuracy[i] >= 0)  // Only count actual trades (0.0=loss, 1.0=win), ignore -1.0
       {
          total++;
-         wins += (int)state.rollingAccuracy[i];
+         if(state.rollingAccuracy[i] >= 0.5)  // Win if >= 0.5
+            wins++;
       }
    }
-   
-   double accuracy = (total > 0) ? ((double)wins / total) : 0.75;
-   
+
+   double accuracy = (total > 0) ? ((double)wins / total) : 0.75;  // Default 75% when no trades yet
+
+   if(Enable_Debug && total > 0)
+   {
+      Print("Rolling Accuracy: ", wins, "/", total, " = ", DoubleToString(accuracy * 100, 1), "%");
+   }
+
    // Calculate ML probability based on FPF state and signals
    state.mlProbability = CalculateMLProbability();
-   
+
    // Gate trading based on accuracy and probability
    if(accuracy < ML_Stop_Accuracy)
    {
       state.tradingEnabled = false;
       if(Enable_Debug)
-         Print("Trading DISABLED - Accuracy: ", accuracy, " < ", ML_Stop_Accuracy);
+         Print("Trading DISABLED - Accuracy: ", DoubleToString(accuracy * 100, 1), "% < ", DoubleToString(ML_Stop_Accuracy * 100, 1), "%");
    }
    else
    {
       state.tradingEnabled = true;
+      if(Enable_Debug && total == 0)
+         Print("Trading ENABLED - No trades yet, using default accuracy assumption");
    }
 }
 
