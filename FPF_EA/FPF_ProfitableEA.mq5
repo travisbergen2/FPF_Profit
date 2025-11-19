@@ -13,10 +13,10 @@
 
 //--- Input Parameters
 input group "=== FPF Core Settings ==="
-input double      FPF_Phi_Entry = 0.12;           // Min Phi for entry
-input double      FPF_DecisionPot_Min = 0.10;     // Min decision potential
-input double      ML_Entry_Threshold = 0.75;      // ML probability threshold
-input double      ML_Stop_Accuracy = 0.60;        // Stop trading if accuracy drops below
+input double      FPF_Phi_Entry = 0.08;           // Min Phi for entry (lowered from 0.12)
+input double      FPF_DecisionPot_Min = 0.05;     // Min decision potential (lowered from 0.10)
+input double      ML_Entry_Threshold = 0.55;      // ML probability threshold (lowered from 0.75)
+input double      ML_Stop_Accuracy = 0.45;        // Stop trading if accuracy drops below (lowered from 0.60)
 
 input group "=== Risk Management ==="
 input double      Risk_Percent = 1.0;              // Risk per trade %
@@ -43,7 +43,7 @@ input double      Breakeven_Profit_Points = 100;
 input bool        Enable_Trailing = true;
 input double      Trail_Start_Points = 150;
 input double      Trail_Step_Points = 50;
-input bool        Enable_Debug = false;
+input bool        Enable_Debug = true;           // ENABLED for debugging
 
 //--- Global Objects
 FractalPersonalityField fpf;
@@ -316,19 +316,28 @@ double CalculateMLProbability()
 //+------------------------------------------------------------------+
 void CheckForEntry()
 {
+   if(Enable_Debug)
+   {
+      Print("========================================");
+      Print("=== CHECKING FOR ENTRY ===");
+      Print("Phi: ", state.currentPhi, " (Required: ", FPF_Phi_Entry, ")");
+      Print("DecPot: ", state.currentDecPot, " (Required: ", FPF_DecisionPot_Min, ")");
+      Print("ML Prob: ", state.mlProbability, " (Required: ", ML_Entry_Threshold, ")");
+   }
+
    // Primary FPF gating
    if(state.currentPhi < FPF_Phi_Entry)
    {
       if(Enable_Debug) Print("Entry rejected - Low Phi: ", state.currentPhi);
       return;
    }
-   
+
    if(state.currentDecPot < FPF_DecisionPot_Min)
    {
       if(Enable_Debug) Print("Entry rejected - Low DecPot: ", state.currentDecPot);
       return;
    }
-   
+
    // ML gating
    if(state.mlProbability < ML_Entry_Threshold)
    {
@@ -338,13 +347,23 @@ void CheckForEntry()
    
    // Detect big move signals
    signalDetector.Update(_Symbol, TF_Primary);
-   
+
    bool compressionDetected = signalDetector.IsCompressionDetected();
    bool sweepsDetected = signalDetector.AreSweepsDetected();
    bool spreadNarrowing = signalDetector.IsSpreadNarrowing();
    bool stopHuntDetected = signalDetector.IsStopHuntDetected();
    bool wickTestDetected = signalDetector.IsWickTestDetected();
    bool tfAlignment = signalDetector.IsTimeframeAligned();
+
+   if(Enable_Debug)
+   {
+      Print("=== SIGNAL DETECTION ===");
+      Print("Compression: ", compressionDetected, " (Score: ", signalDetector.GetCompressionScore(), ")");
+      Print("Sweeps: ", sweepsDetected, " (Score: ", signalDetector.GetSweepScore(), ")");
+      Print("StopHunt: ", stopHuntDetected, " (Score: ", signalDetector.GetStopHuntScore(), ")");
+      Print("WickTest: ", wickTestDetected, " (Score: ", signalDetector.GetWickScore(), ")");
+      Print("TF_Align: ", tfAlignment, " (Score: ", signalDetector.GetTimeframeAlignment(), ")");
+   }
    
    // Require multiple signal confirmations
    int signalCount = 0;
@@ -353,8 +372,8 @@ void CheckForEntry()
    if(stopHuntDetected) signalCount++;
    if(wickTestDetected) signalCount++;
    if(tfAlignment) signalCount++;
-   
-   if(signalCount < 3)
+
+   if(signalCount < 2)  // Lowered from 3 to 2 for more trade opportunities
    {
       if(Enable_Debug) Print("Entry rejected - Insufficient signals: ", signalCount);
       return;
@@ -362,7 +381,11 @@ void CheckForEntry()
    
    // Determine direction
    int direction = DetermineDirection();
-   if(direction == 0) return;
+   if(direction == 0)
+   {
+      if(Enable_Debug) Print("Entry rejected - No clear direction");
+      return;
+   }
    
    // Execute trade
    ExecuteTrade(direction);
@@ -421,19 +444,28 @@ int DetermineDirection()
    
    // Additional FPF bias
    double fpfBias = fpf.GetPhi(1.0);
-   
+
    // Release handles
    IndicatorRelease(h_ema_fast_pri);
    IndicatorRelease(h_ema_slow_pri);
    IndicatorRelease(h_ema_fast_sec);
    IndicatorRelease(h_ema_slow_sec);
-   
-   if(bullishPrimary && bullishSecondary && priceAboveEMA && fpfBias > 0)
+
+   if(Enable_Debug)
+   {
+      Print("Direction Analysis: BullPri=", bullishPrimary, " BullSec=", bullishSecondary,
+            " PriceAbove=", priceAboveEMA, " FPFBias=", fpfBias);
+      Print("Direction Analysis: BearPri=", bearishPrimary, " BearSec=", bearishSecondary,
+            " PriceBelow=", priceBelowEMA);
+   }
+
+   // Relaxed direction requirements - only need primary timeframe + FPF alignment
+   if(bullishPrimary && priceAboveEMA && fpfBias > 0)
       return 1;  // Buy
-   
-   if(bearishPrimary && bearishSecondary && priceBelowEMA && fpfBias < 0)
+
+   if(bearishPrimary && priceBelowEMA && fpfBias < 0)
       return -1; // Sell
-   
+
    return 0; // No clear direction
 }
 
