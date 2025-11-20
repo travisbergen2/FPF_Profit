@@ -33,6 +33,11 @@ private:
    bool                    m_hasLastBar;
    datetime                m_lastBarTime;
 
+   // Exploration mode: Build initial experience before relying on meta-learning
+   int                     m_explorationTradesTarget;  // how many trades before switching to pure learning
+   int                     m_totalClosedTrades;        // total trades closed (exploration counter)
+   bool                    m_explorationMode;          // currently in exploration phase
+
    // Position tracking for learning
    struct PositionMemory
    {
@@ -69,6 +74,11 @@ public:
       m_lastBarTime = 0;
       m_startOfDayEquity = AccountInfoDouble(ACCOUNT_EQUITY);
 
+      // Initialize exploration mode (cold start solution)
+      m_explorationTradesTarget = 100;    // take 100 exploration trades before relying on meta-learning
+      m_totalClosedTrades = 0;
+      m_explorationMode = true;           // start in exploration mode
+
       m_numPositions = 0;
       ArrayResize(m_positionMemory, 0);
 
@@ -95,6 +105,7 @@ public:
       m_startOfDayEquity = AccountInfoDouble(ACCOUNT_EQUITY);
       Print("TradeController initialized on ", m_symbol, " ", EnumToString(m_tf));
       Print("Nervous system active - sensing microstructure...");
+      Print("EXPLORATION MODE: Will take ", m_explorationTradesTarget, " initial trades using simple rules to build experience");
    }
 
    //+------------------------------------------------------------------+
@@ -136,17 +147,23 @@ private:
    //+------------------------------------------------------------------+
    void OnNewBar(const BarSummary &closedBar)
    {
+      string mode_str = m_explorationMode ? "EXPLORE" : "META-LEARN";
       Print("New bar detected at ", closedBar.time,
-            " | Learned contexts: ", m_learner.GetContextCount());
+            " | Mode: ", mode_str,
+            " | Trades: ", m_totalClosedTrades, "/", m_explorationTradesTarget,
+            " | Contexts: ", m_learner.GetContextCount());
 
       // If we have a previous bar, use it to predict and maybe enter
       if(m_hasLastBar)
       {
          PredictionResult pred = m_learner.Predict(m_lastBarSummary);
 
-         Print("Bar prediction - ExpR Long: ", DoubleToString(pred.expected_R_long, 2),
-               " Short: ", DoubleToString(pred.expected_R_short, 2),
-               " Conf: ", DoubleToString(pred.confidence, 2));
+         if(!m_explorationMode)
+         {
+            Print("Bar prediction - ExpR Long: ", DoubleToString(pred.expected_R_long, 2),
+                  " Short: ", DoubleToString(pred.expected_R_short, 2),
+                  " Conf: ", DoubleToString(pred.confidence, 2));
+         }
 
          // Evaluate entry at start of new bar
          EvaluateEntry(m_lastBarSummary, pred);
@@ -161,6 +178,7 @@ private:
    //+------------------------------------------------------------------+
    //| EvaluateEntry: Decide whether to open trade at bar boundary      |
    //| Motor decision: reach (enter) or pull back (wait)?               |
+   //| Uses exploration mode initially, then switches to meta-learning  |
    //+------------------------------------------------------------------+
    void EvaluateEntry(const BarSummary &recentBar, const PredictionResult &pred)
    {
@@ -174,37 +192,111 @@ private:
       // Don't trade if already in position (simple version)
       if(PositionSelect(m_symbol))
       {
-         Print("Already in position - skipping entry");
          return;
       }
 
-      // Entry threshold: need positive expected R and minimum confidence
-      double min_expected_R = 0.5;
-      double min_confidence = 0.3;
-
-      bool should_enter_long = (pred.expected_R_long > min_expected_R &&
-                                 pred.confidence > min_confidence);
-
-      bool should_enter_short = (pred.expected_R_short > min_expected_R &&
-                                  pred.confidence > min_confidence);
-
-      if(!should_enter_long && !should_enter_short)
-      {
-         Print("No entry signal - expected R or confidence too low");
-         return;
-      }
-
-      // Decide direction based on stronger expected R
       int direction = 0;
-      if(should_enter_long && pred.expected_R_long > pred.expected_R_short)
-         direction = 1;
-      else if(should_enter_short)
-         direction = -1;
+
+      // EXPLORATION MODE: Use simple rule-based entry to build initial experience
+      if(m_explorationMode)
+      {
+         direction = ExplorationEntry(recentBar);
+         if(direction != 0)
+         {
+            Print("EXPLORATION: Taking trade based on simple rules");
+         }
+      }
+      // META-LEARNING MODE: Use learned patterns
+      else
+      {
+         // Entry threshold: need positive expected R and minimum confidence
+         double min_expected_R = 0.5;
+         double min_confidence = 0.3;
+
+         bool should_enter_long = (pred.expected_R_long > min_expected_R &&
+                                    pred.confidence > min_confidence);
+
+         bool should_enter_short = (pred.expected_R_short > min_expected_R &&
+                                     pred.confidence > min_confidence);
+
+         if(!should_enter_long && !should_enter_short)
+         {
+            return;
+         }
+
+         // Decide direction based on stronger expected R
+         if(should_enter_long && pred.expected_R_long > pred.expected_R_short)
+            direction = 1;
+         else if(should_enter_short)
+            direction = -1;
+
+         if(direction != 0)
+         {
+            Print("META-LEARN: Trading on learned pattern (ExpR: ",
+                  DoubleToString(direction > 0 ? pred.expected_R_long : pred.expected_R_short, 2), ")");
+         }
+      }
 
       if(direction != 0)
       {
          OpenTrade(direction, recentBar);
       }
+   }
+
+   //+------------------------------------------------------------------+
+   //| ExplorationEntry: Simple rule-based entry for initial learning   |
+   //| Uses basic BigMove signals to take trades and build experience   |
+   //| Returns: +1 long, -1 short, 0 no trade                           |
+   //+------------------------------------------------------------------+
+   int ExplorationEntry(const BarSummary &bar)
+   {
+      // Simple exploration logic:
+      // 1. Compression building (setup forming) - compression_mean > 0.4
+      // 2. TF alignment strong (direction clear) - tfalign_mean > 0.5
+      // 3. Low sweep activity (not yet reversed) - sweep_mean < 0.5
+      // 4. Direction based on TF alignment bias
+
+      // Check for setup conditions
+      bool has_compression = (bar.compression_mean > 0.4);
+      bool has_alignment = (bar.tfalign_mean > 0.5);
+      bool low_sweeps = (bar.sweep_mean < 0.5);
+
+      if(!has_compression || !has_alignment)
+      {
+         return 0;  // No setup
+      }
+
+      // Determine direction from price action and alignment
+      // If close > open and aligned, go long
+      // If close < open and aligned, go short
+      bool bullish_bar = (bar.close > bar.open);
+      bool bearish_bar = (bar.close < bar.open);
+
+      // Alternate strategy: take trades periodically to ensure diversity
+      // Every 5th bar with compression, try opposite direction to last trade
+      static int exploration_count = 0;
+      exploration_count++;
+
+      // Primary: follow bar direction if strong compression
+      if(has_compression && has_alignment && low_sweeps)
+      {
+         if(bullish_bar)
+            return 1;  // Long
+         else if(bearish_bar)
+            return -1; // Short
+      }
+
+      // Secondary: if compression is very strong, trade even without perfect alignment
+      if(bar.compression_mean > 0.6 && bar.compression_slope > 0.0)
+      {
+         // Compression ramping up - trade in current bar direction
+         if(bullish_bar)
+            return 1;
+         else if(bearish_bar)
+            return -1;
+      }
+
+      return 0;  // No trade
    }
 
    //+------------------------------------------------------------------+
@@ -327,8 +419,24 @@ private:
                   // Feed to learner
                   m_learner.Update(outcome);
 
+                  // Increment closed trades counter
+                  m_totalClosedTrades++;
+
+                  // Check if exploration phase complete
+                  if(m_explorationMode && m_totalClosedTrades >= m_explorationTradesTarget)
+                  {
+                     m_explorationMode = false;
+                     Print("========================================================");
+                     Print("EXPLORATION COMPLETE! Switching to META-LEARNING MODE");
+                     Print("Closed trades: ", m_totalClosedTrades);
+                     Print("Learned contexts: ", m_learner.GetContextCount());
+                     Print("========================================================");
+                  }
+
+                  string mode_str = m_explorationMode ? "EXPLORE" : "META-LEARN";
                   Print("Trade closed: R = ", DoubleToString(R, 2),
-                        " | Meta-learner updated");
+                        " | Mode: ", mode_str,
+                        " | Total trades: ", m_totalClosedTrades);
 
                   // Mark as processed
                   m_positionMemory[i].active = false;
